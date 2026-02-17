@@ -17,7 +17,12 @@ export interface HealthData {
 export interface User {
   id: string;
   email: string;
-  name: string | null;
+  password?: string;
+  name?: string | null;
+  hubspotAccessToken?: string | null;
+  hubspotRefreshToken?: string | null;
+  hubspotOwnerId?: string | null;
+  hubspotTokenExpiresAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }

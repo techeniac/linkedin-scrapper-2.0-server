@@ -1,6 +1,7 @@
 import { Router } from "express";
 import healthRoutes from "./healthRoutes";
 import authRoutes from "./authRoutes";
+import hubspotRoutes from "./hubspotRoutes";
 import rateLimit from "express-rate-limit";
 import { RATE_LIMIT_WINDOW, RATE_LIMIT_MAX } from "../config/env";
 
@@ -15,5 +16,6 @@ const limiter = rateLimit({
 router.use(limiter);
 router.use("/health", healthRoutes);
 router.use("/auth", authRoutes);
+router.use("/hubspot", hubspotRoutes);
 
 export default router;

@@ -1,17 +1,17 @@
-import jwt from "jsonwebtoken";
+import jwt, { SignOptions } from "jsonwebtoken";
 import { UserModel } from "../models/userModel";
 import { JWT_SECRET, JWT_EXPIRES_IN } from "../config/env";
 import { AuthResponse, LoginRequest, RegisterRequest } from "../types";
 
 export class AuthService {
   static generateToken(userId: string): string {
-    return jwt.sign({ userId }, JWT_SECRET as string, {
+    return jwt.sign({ userId }, JWT_SECRET, {
       expiresIn: JWT_EXPIRES_IN,
-    });
+    } as SignOptions);
   }
 
   static verifyToken(token: string): any {
-    return jwt.verify(token, JWT_SECRET as string);
+    return jwt.verify(token, JWT_SECRET);
   }
 
   static async register(data: RegisterRequest): Promise<AuthResponse> {
@@ -35,7 +35,7 @@ export class AuthService {
 
     const isValidPassword = await UserModel.comparePassword(
       data.password,
-      user.password,
+      user.password!,
     );
     if (!isValidPassword) {
       throw new Error("Invalid credentials");

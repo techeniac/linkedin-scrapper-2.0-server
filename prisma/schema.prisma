@@ -8,12 +8,16 @@ datasource db {
 }
 
 model User {
-  id        String   @id @default(uuid())
-  email     String   @unique
-  password  String
-  name      String?
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  id                    String    @id @default(uuid())
+  email                 String    @unique
+  password              String
+  name                  String?
+  hubspotAccessToken    String?   @map("hubspot_access_token")
+  hubspotRefreshToken   String?   @map("hubspot_refresh_token")
+  hubspotOwnerId        String?   @map("hubspot_owner_id")
+  hubspotTokenExpiresAt DateTime? @map("hubspot_token_expires_at")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
 
   @@map("users")
 }
