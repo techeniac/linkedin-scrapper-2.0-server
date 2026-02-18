@@ -16,12 +16,27 @@ export class UserModel {
         password: hashedPassword,
         name,
       },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        createdAt: true,
+        updatedAt: true,
+      },
     });
   }
 
   static async findByEmail(email: string): Promise<any> {
     return prisma.user.findUnique({
       where: { email },
+      select: {
+        id: true,
+        email: true,
+        password: true,
+        name: true,
+        createdAt: true,
+        updatedAt: true,
+      },
     });
   }
 

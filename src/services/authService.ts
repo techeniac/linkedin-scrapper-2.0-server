@@ -24,7 +24,7 @@ export class AuthService {
     const token = this.generateToken(user.id);
 
     const { password, ...userWithoutPassword } = user;
-    return { user: userWithoutPassword, token };
+    return { user: { ...userWithoutPassword, token } };
   }
 
   static async login(data: LoginRequest): Promise<AuthResponse> {
@@ -44,6 +44,6 @@ export class AuthService {
     const token = this.generateToken(user.id);
 
     const { password, ...userWithoutPassword } = user;
-    return { user: userWithoutPassword, token };
+    return { user: { ...userWithoutPassword, token } };
   }
 }

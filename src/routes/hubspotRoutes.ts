@@ -3,6 +3,8 @@ import { authenticate } from "../middlewares/auth";
 import { HubSpotOAuthService } from "../services/hubspotOAuthService";
 import { successResponse, errorResponse } from "../utils/apiResponse";
 import { AuthRequest } from "../types";
+import prisma from "../config/prisma";
+import hubspotSyncRoutes from "./hubspotSyncRoutes";
 
 const router = Router();
 
@@ -65,8 +67,6 @@ router.post("/disconnect", authenticate, async (req: AuthRequest, res) => {
   }
 });
 
-import prisma from "../config/prisma";
-
 router.get("/status", authenticate, async (req: AuthRequest, res) => {
   try {
     const user = await prisma.user.findUnique({
@@ -81,5 +81,7 @@ router.get("/status", authenticate, async (req: AuthRequest, res) => {
     errorResponse(res, error.message, 500);
   }
 });
+
+router.use("/", hubspotSyncRoutes);
 
 export default router;

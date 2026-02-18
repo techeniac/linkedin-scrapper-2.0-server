@@ -23,6 +23,7 @@ export interface User {
   hubspotRefreshToken?: string | null;
   hubspotOwnerId?: string | null;
   hubspotTokenExpiresAt?: Date | null;
+  token?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -44,5 +45,6 @@ export interface RegisterRequest {
 
 export interface AuthResponse {
   user: User;
-  token: string;
 }
+
+export * from "./hubspot.types";
