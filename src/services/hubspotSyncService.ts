@@ -239,12 +239,35 @@ export class HubSpotSyncService {
     );
   }
 
+  // Get owner details by owner ID
+  private async getOwnerById(ownerId: string): Promise<string | null> {
+    try {
+      const response = await axios.get(
+        `${this.baseUrl}/crm/v3/owners/${ownerId}`,
+        { headers: this.headers },
+      );
+      const owner = response.data;
+      return (
+        [owner.firstName, owner.lastName].filter(Boolean).join(" ").trim() ||
+        owner.email ||
+        null
+      );
+    } catch (err: any) {
+      logger.error(`[HubSpot] Failed to fetch owner: ${err.message}`);
+      return null;
+    }
+  }
+
   // Search for contact by LinkedIn profile URL
   async findContactByProfileUrl(username: string): Promise<{
     id: string;
     firstname?: string;
     lastname?: string;
     email?: string;
+    company?: string;
+    owner?: string;
+    phone?: string;
+    lifecycleStage?: string;
     lastmodifieddate?: string;
   } | null> {
     if (!username || !username.trim()) return null;
@@ -269,7 +292,11 @@ export class HubSpotSyncService {
             "firstname",
             "lastname",
             "email",
+            "company",
+            "phone",
             "lastmodifieddate",
+            "hubspot_owner_id",
+            "lifecyclestage",
             "hs_object_id",
             "hs_linkedin_url",
           ],
@@ -287,11 +314,22 @@ export class HubSpotSyncService {
 
       if (!matched) return null;
 
+      const ownerId = matched.properties?.hubspot_owner_id;
+      let ownerName: string | null = null;
+
+      if (ownerId) {
+        ownerName = await this.getOwnerById(ownerId);
+      }
+
       return {
         id: matched.id,
         firstname: matched.properties?.firstname,
         lastname: matched.properties?.lastname,
         email: matched.properties?.email,
+        phone: matched.properties?.phone,
+        company: matched.properties?.company,
+        owner: ownerName || undefined,
+        lifecycleStage: matched.properties?.lifecyclestage,
         lastmodifieddate: matched.properties?.lastmodifieddate,
       };
     } catch (err: any) {
@@ -365,5 +403,75 @@ export class HubSpotSyncService {
     } catch {
       return null;
     }
+  }
+
+  // Fetch HubSpot property options (owners and lifecycle stages)
+  async getPropertyOptions(): Promise<{
+    owners: Array<{ label: string; value: string }>;
+    lifecycleStages: Array<{ label: string; value: string }>;
+  }> {
+    // Fetch owners
+    const ownersResp = await axios.get(`${this.baseUrl}/crm/v3/owners`, {
+      headers: this.headers,
+    });
+    const owners = (ownersResp.data?.results || []).map((o: any) => ({
+      label:
+        [o.firstName, o.lastName].filter(Boolean).join(" ").trim() ||
+        o.email ||
+        o.id,
+      value: String(o.id),
+    }));
+
+    // Fetch lifecycle stages
+    const lifecycleResp = await axios.get(
+      `${this.baseUrl}/crm/v3/properties/contact/lifecyclestage`,
+      { headers: this.headers },
+    );
+    const lifecycleStages = (lifecycleResp.data?.options || []).map(
+      (opt: any) => ({
+        label: opt.label,
+        value: opt.value,
+      }),
+    );
+
+    return { owners, lifecycleStages };
+  }
+
+  // Update contact by LinkedIn username
+  async updateContactByUsername(
+    username: string,
+    updates: {
+      name?: string;
+      email?: string;
+      phone?: string;
+      owner?: string;
+      lifecycle?: string;
+      company?: string;
+    },
+  ): Promise<void> {
+    // Find contact first
+    const contact = await this.findContactByProfileUrl(username);
+    if (!contact) {
+      throw new Error("Contact not found in HubSpot");
+    }
+
+    const properties: Record<string, string> = {};
+
+    if (updates.name) {
+      const nameParts = updates.name.split(" ");
+      properties.firstname = nameParts[0] || "";
+      properties.lastname = nameParts.slice(1).join(" ") || "";
+    }
+    if (updates.email) properties.email = updates.email;
+    if (updates.phone) properties.phone = updates.phone;
+    if (updates.owner) properties.hubspot_owner_id = updates.owner;
+    if (updates.lifecycle) properties.lifecyclestage = updates.lifecycle;
+    if (updates.company) properties.company = updates.company;
+
+    await axios.patch(
+      `${this.baseUrl}/crm/v3/objects/contacts/${contact.id}`,
+      { properties },
+      { headers: this.headers },
+    );
   }
 }

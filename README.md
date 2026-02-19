@@ -84,22 +84,22 @@ npm run prisma:studio - Open Prisma Studio
 API Endpoints :
 
 ```bash
-    #Authentication :
-    POST /api/auth/register - Register new user
-    POST /api/auth/login - Login user
-    POST /api/auth/logout - Logout user
-    GET /api/auth/profile - Get user profile
+#Authentication :
+POST /api/auth/register  # Register new user
+POST /api/auth/login  # Login user
+POST /api/auth/logout  # Logout user
+GET /api/auth/profile  # Get user profile
 
-    #HubSpot Integration :
-    GET /api/hubspot/connect - Get HubSpot OAuth URL
-    GET /api/hubspot/callback - OAuth callback
-    POST /api/hubspot/disconnect - Disconnect HubSpot
-    GET /api/hubspot/status - Check connection status
-    POST /api/hubspot/sync-lead - Sync LinkedIn lead to HubSpot
-    GET /api/hubspot/check-profile - Check if profile exists in HubSpot
+#HubSpot Integration :
+GET /api/hubspot/connect  # Get HubSpot OAuth URL
+GET /api/hubspot/callback  # OAuth callback
+POST /api/hubspot/disconnect  # Disconnect HubSpot
+GET /api/hubspot/status  # Check connection status
+POST /api/hubspot/sync-lead  # Sync LinkedIn lead to HubSpot
+GET /api/hubspot/check-profile  # Check if profile exists in HubSpot
 
-    #Health
-    GET /api/health - Health check
+#Health
+GET /api/health  # Health check
 ```
 
 Project Structure

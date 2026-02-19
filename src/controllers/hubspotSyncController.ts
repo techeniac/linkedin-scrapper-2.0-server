@@ -83,12 +83,61 @@ export const checkProfile = async (
         exists: true,
         synced: true,
         name,
+        email: contact.email,
+        phone: contact.phone,
+        company: contact.company,
+        owner: contact.owner,
+        lifecycleStage: contact.lifecycleStage,
         syncedAt: contact.lastmodifieddate,
       });
       return;
     }
 
     successResponse(res, { exists: false, synced: false });
+  } catch (error: any) {
+    next(error);
+  }
+};
+
+// Get HubSpot property options (owners and lifecycle stages)
+export const getPropertyOptions = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const userId = req.user!.id;
+    const accessToken = await HubSpotOAuthService.getValidAccessToken(userId);
+    const hubspotService = new HubSpotSyncService(accessToken);
+
+    const options = await hubspotService.getPropertyOptions();
+    successResponse(res, options, "Property options fetched successfully");
+  } catch (error: any) {
+    next(error);
+  }
+};
+
+// Update contact in HubSpot
+export const updateContact = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const { username } = req.query;
+    const updates = req.body;
+
+    if (!username || typeof username !== "string") {
+      errorResponse(res, "username is required", 400);
+      return;
+    }
+
+    const userId = req.user!.id;
+    const accessToken = await HubSpotOAuthService.getValidAccessToken(userId);
+    const hubspotService = new HubSpotSyncService(accessToken);
+
+    await hubspotService.updateContactByUsername(username, updates);
+    successResponse(res, null, "Contact updated successfully");
   } catch (error: any) {
     next(error);
   }
