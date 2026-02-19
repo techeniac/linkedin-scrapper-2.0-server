@@ -21,3 +21,15 @@ model User {
 
   @@map("users")
 }
+
+model OAuthState {
+  id        String   @id @default(uuid())
+  state     String   @unique
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@map("oauth_states")
+  @@index([state])
+  @@index([expiresAt])
+}

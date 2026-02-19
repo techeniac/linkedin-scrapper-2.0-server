@@ -5,32 +5,40 @@ import morgan from "morgan";
 import routes from "./routes";
 import errorHandler from "./middlewares/errorHandler";
 import { requestLogger } from "./middlewares/logger";
+import { ALLOWED_ORIGINS, NODE_ENV } from "./config/env";
 
-// Initialize Express application
 const app: Application = express();
 
-// Security middleware - sets various HTTP headers
 app.use(helmet());
 
-// Enable CORS for all routes
-app.use(cors());
+// CORS configuration
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // Allow requests with no origin (Postman, mobile apps, curl)
+      if (!origin) return callback(null, true);
 
-// Parse JSON request bodies
-app.use(express.json());
+      // In development, allow all origins
+      if (NODE_ENV === "development") return callback(null, true);
 
-// Parse URL-encoded request bodies
-app.use(express.urlencoded({ extended: true }));
+      // In production, check whitelist
+      if (ALLOWED_ORIGINS.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  }),
+);
 
-// HTTP request logger
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 app.use(morgan("combined"));
-
-// Custom request logger middleware
 app.use(requestLogger);
-
-// Mount API routes
 app.use("/api", routes);
-
-// Global error handler (must be last)
 app.use(errorHandler);
 
 export default app;

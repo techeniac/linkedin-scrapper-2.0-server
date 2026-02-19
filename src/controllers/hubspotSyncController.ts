@@ -6,7 +6,6 @@ import { AuthRequest } from "../types";
 import { SyncLeadRequest } from "../types/hubspot.types";
 import prisma from "../config/prisma";
 
-// Sync LinkedIn contact and company data to HubSpot
 export const syncLead = async (
   req: AuthRequest,
   res: Response,
@@ -15,29 +14,22 @@ export const syncLead = async (
   try {
     const { contact, company }: SyncLeadRequest = req.body;
 
-    // Validate required contact fields
-    if (!contact || !contact.name || !contact.profileUrl) {
-      errorResponse(res, "Contact with name and profileUrl required", 400);
-      return;
-    }
-
     const userId = req.user!.id;
     const user = await prisma.user.findUnique({ where: { id: userId } });
 
-    // Verify HubSpot connection
-    if (!user?.hubspotOwnerId) {
+    // Check HubSpot connection via access token
+    if (!user?.hubspotAccessToken || !user?.hubspotRefreshToken) {
       errorResponse(res, "HubSpot connection required", 400);
       return;
     }
 
-    // Get valid access token and sync lead
     const accessToken = await HubSpotOAuthService.getValidAccessToken(userId);
     const hubspotService = new HubSpotSyncService(accessToken);
 
     const result = await hubspotService.syncFullLead(
       contact,
       company || null,
-      user.hubspotOwnerId,
+      user.hubspotOwnerId || undefined,
     );
 
     successResponse(res, result, "Lead synced successfully");
@@ -46,7 +38,6 @@ export const syncLead = async (
   }
 };
 
-// Check if LinkedIn profile exists in HubSpot
 export const checkProfile = async (
   req: AuthRequest,
   res: Response,
@@ -55,25 +46,21 @@ export const checkProfile = async (
   try {
     const { username } = req.query;
 
-    if (!username || typeof username !== "string") {
-      errorResponse(res, "username is required", 400);
-      return;
-    }
-
     const userId = req.user!.id;
     const user = await prisma.user.findUnique({ where: { id: userId } });
 
-    // Return not synced if no HubSpot connection
-    if (!user?.hubspotOwnerId) {
+    // Check HubSpot connection via access token
+    if (!user?.hubspotAccessToken || !user?.hubspotRefreshToken) {
       successResponse(res, { exists: false, synced: false });
       return;
     }
 
-    // Search for contact in HubSpot
     const accessToken = await HubSpotOAuthService.getValidAccessToken(userId);
     const hubspotService = new HubSpotSyncService(accessToken);
 
-    const contact = await hubspotService.findContactByProfileUrl(username);
+    const contact = await hubspotService.findContactByProfileUrl(
+      username as string,
+    );
 
     if (contact) {
       const name =
@@ -99,7 +86,6 @@ export const checkProfile = async (
   }
 };
 
-// Get HubSpot property options (owners and lifecycle stages)
 export const getPropertyOptions = async (
   req: AuthRequest,
   res: Response,
@@ -117,7 +103,6 @@ export const getPropertyOptions = async (
   }
 };
 
-// Update contact in HubSpot
 export const updateContact = async (
   req: AuthRequest,
   res: Response,
@@ -125,10 +110,26 @@ export const updateContact = async (
 ): Promise<void> => {
   try {
     const { username } = req.query;
-    const updates = req.body;
 
-    if (!username || typeof username !== "string") {
-      errorResponse(res, "username is required", 400);
+    // Whitelist allowed properties
+    const allowedFields = [
+      "name",
+      "email",
+      "phone",
+      "owner",
+      "lifecycle",
+      "company",
+    ];
+    const updates: Record<string, string> = {};
+
+    for (const field of allowedFields) {
+      if (req.body[field] !== undefined) {
+        updates[field] = req.body[field];
+      }
+    }
+
+    if (Object.keys(updates).length === 0) {
+      errorResponse(res, "No valid fields to update", 400);
       return;
     }
 
@@ -136,7 +137,7 @@ export const updateContact = async (
     const accessToken = await HubSpotOAuthService.getValidAccessToken(userId);
     const hubspotService = new HubSpotSyncService(accessToken);
 
-    await hubspotService.updateContactByUsername(username, updates);
+    await hubspotService.updateContactByUsername(username as string, updates);
     successResponse(res, null, "Contact updated successfully");
   } catch (error: any) {
     next(error);
