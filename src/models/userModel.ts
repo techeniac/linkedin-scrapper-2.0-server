@@ -2,7 +2,9 @@ import prisma from "../config/prisma";
 import bcrypt from "bcryptjs";
 import { User } from "../types";
 
+// User model for database operations
 export class UserModel {
+  // Create a new user with hashed password
   static async create(
     email: string,
     password: string,
@@ -26,6 +28,7 @@ export class UserModel {
     });
   }
 
+  // Find user by email (includes password for authentication)
   static async findByEmail(email: string): Promise<any> {
     return prisma.user.findUnique({
       where: { email },
@@ -40,6 +43,7 @@ export class UserModel {
     });
   }
 
+  // Find user by ID (excludes password)
   static async findById(id: string): Promise<User | null> {
     return prisma.user.findUnique({
       where: { id },
@@ -53,6 +57,7 @@ export class UserModel {
     });
   }
 
+  // Compare plain password with hashed password
   static async comparePassword(
     plainPassword: string,
     hashedPassword: string,

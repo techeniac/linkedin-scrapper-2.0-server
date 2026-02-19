@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import logger from "../utils/logger";
 
+// Middleware to log HTTP requests with duration
 export const requestLogger = (
   req: Request,
   res: Response,
@@ -8,6 +9,7 @@ export const requestLogger = (
 ): void => {
   const start = Date.now();
 
+  // Log request details when response finishes
   res.on("finish", () => {
     const duration = Date.now() - start;
     logger.info({

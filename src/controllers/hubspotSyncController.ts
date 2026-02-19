@@ -6,6 +6,7 @@ import { AuthRequest } from "../types";
 import { SyncLeadRequest } from "../types/hubspot.types";
 import prisma from "../config/prisma";
 
+// Sync LinkedIn contact and company data to HubSpot
 export const syncLead = async (
   req: AuthRequest,
   res: Response,
@@ -14,6 +15,7 @@ export const syncLead = async (
   try {
     const { contact, company }: SyncLeadRequest = req.body;
 
+    // Validate required contact fields
     if (!contact || !contact.name || !contact.profileUrl) {
       errorResponse(res, "Contact with name and profileUrl required", 400);
       return;
@@ -22,11 +24,13 @@ export const syncLead = async (
     const userId = req.user!.id;
     const user = await prisma.user.findUnique({ where: { id: userId } });
 
+    // Verify HubSpot connection
     if (!user?.hubspotOwnerId) {
       errorResponse(res, "HubSpot connection required", 400);
       return;
     }
 
+    // Get valid access token and sync lead
     const accessToken = await HubSpotOAuthService.getValidAccessToken(userId);
     const hubspotService = new HubSpotSyncService(accessToken);
 
@@ -42,6 +46,7 @@ export const syncLead = async (
   }
 };
 
+// Check if LinkedIn profile exists in HubSpot
 export const checkProfile = async (
   req: AuthRequest,
   res: Response,
@@ -58,11 +63,13 @@ export const checkProfile = async (
     const userId = req.user!.id;
     const user = await prisma.user.findUnique({ where: { id: userId } });
 
+    // Return not synced if no HubSpot connection
     if (!user?.hubspotOwnerId) {
       successResponse(res, { exists: false, synced: false });
       return;
     }
 
+    // Search for contact in HubSpot
     const accessToken = await HubSpotOAuthService.getValidAccessToken(userId);
     const hubspotService = new HubSpotSyncService(accessToken);
 

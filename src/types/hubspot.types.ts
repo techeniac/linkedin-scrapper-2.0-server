@@ -1,3 +1,4 @@
+// LinkedIn contact data structure
 export interface ContactData {
   name: string;
   profileUrl: string;
@@ -25,6 +26,7 @@ export interface ContactData {
   experiences?: ExperienceData[];
 }
 
+// Work experience data from LinkedIn
 export interface ExperienceData {
   role?: string | null;
   companyLine?: string | null;
@@ -33,6 +35,7 @@ export interface ExperienceData {
   skillsSummary?: string | null;
 }
 
+// LinkedIn company data structure
 export interface CompanyData {
   name?: string | null;
   website?: string | null;
@@ -47,11 +50,13 @@ export interface CompanyData {
   linkedinCompanyId?: string | null;
 }
 
+// Request payload for syncing lead to HubSpot
 export interface SyncLeadRequest {
   contact: ContactData;
   company?: CompanyData | null;
 }
 
+// Response after syncing lead to HubSpot
 export interface SyncLeadResponse {
   success: boolean;
   contactId: string;

@@ -7,6 +7,7 @@ import {
   HUBSPOT_SCOPES,
 } from "../config/env";
 
+// Default OAuth scopes for HubSpot integration
 const DEFAULT_SCOPES = [
   "crm.objects.contacts.write",
   "crm.objects.contacts.read",
@@ -15,7 +16,9 @@ const DEFAULT_SCOPES = [
   "crm.objects.owners.read",
 ];
 
+// Service for managing HubSpot OAuth authentication
 export class HubSpotOAuthService {
+  // Generate HubSpot OAuth authorization URL
   static getAuthUrl(userId: string): string {
     const scopes = HUBSPOT_SCOPES
       ? HUBSPOT_SCOPES.split(/[\s,]+/).filter(Boolean)
@@ -25,6 +28,7 @@ export class HubSpotOAuthService {
     return `https://app.hubspot.com/oauth/authorize?client_id=${HUBSPOT_CLIENT_ID}&redirect_uri=${encodeURIComponent(HUBSPOT_REDIRECT_URI)}&scope=${scopesParam}&state=${userId}`;
   }
 
+  // Exchange authorization code for access and refresh tokens
   static async exchangeCodeForTokens(code: string) {
     const response = await axios.post(
       "https://api.hubapi.com/oauth/v1/token",
@@ -45,6 +49,7 @@ export class HubSpotOAuthService {
     };
   }
 
+  // Refresh expired access token using refresh token
   static async refreshAccessToken(refreshToken: string) {
     const response = await axios.post(
       "https://api.hubapi.com/oauth/v1/token",
@@ -64,6 +69,7 @@ export class HubSpotOAuthService {
     };
   }
 
+  // Get HubSpot owner ID by email address
   static async getOwnerIdByEmail(
     accessToken: string,
     email: string,
@@ -84,6 +90,7 @@ export class HubSpotOAuthService {
     }
   }
 
+  // Connect user to HubSpot by storing OAuth tokens
   static async connectUser(userId: string, code: string) {
     const user = await prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new Error("User not found");
@@ -108,10 +115,12 @@ export class HubSpotOAuthService {
     return { success: true, ownerId };
   }
 
+  // Get valid access token, refreshing if expired
   static async getValidAccessToken(userId: string): Promise<string> {
     const user = await prisma.user.findUnique({ where: { id: userId } });
     if (!user?.hubspotAccessToken) throw new Error("HubSpot not connected");
 
+    // Refresh token if expired
     if (user.hubspotTokenExpiresAt && user.hubspotTokenExpiresAt < new Date()) {
       const tokens = await this.refreshAccessToken(user.hubspotRefreshToken!);
       const expiresAt = new Date(Date.now() + tokens.expiresIn * 1000);
@@ -131,6 +140,7 @@ export class HubSpotOAuthService {
     return user.hubspotAccessToken;
   }
 
+  // Disconnect user from HubSpot by removing OAuth tokens
   static async disconnectUser(userId: string) {
     await prisma.user.update({
       where: { id: userId },

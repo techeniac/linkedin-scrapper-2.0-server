@@ -3,17 +3,21 @@ import { UserModel } from "../models/userModel";
 import { JWT_SECRET, JWT_EXPIRES_IN } from "../config/env";
 import { AuthResponse, LoginRequest, RegisterRequest } from "../types";
 
+// Authentication service for user registration and login
 export class AuthService {
+  // Generate JWT token for authenticated user
   static generateToken(userId: string): string {
     return jwt.sign({ userId }, JWT_SECRET, {
       expiresIn: JWT_EXPIRES_IN,
     } as SignOptions);
   }
 
+  // Verify and decode JWT token
   static verifyToken(token: string): any {
     return jwt.verify(token, JWT_SECRET);
   }
 
+  // Register new user and return JWT token
   static async register(data: RegisterRequest): Promise<AuthResponse> {
     const existingUser = await UserModel.findByEmail(data.email);
     if (existingUser) {
@@ -27,6 +31,7 @@ export class AuthService {
     return { user: { ...userWithoutPassword, token } };
   }
 
+  // Authenticate user and return JWT token
   static async login(data: LoginRequest): Promise<AuthResponse> {
     const user = await UserModel.findByEmail(data.email);
     if (!user) {

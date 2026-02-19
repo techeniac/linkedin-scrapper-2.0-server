@@ -8,6 +8,7 @@ import hubspotSyncRoutes from "./hubspotSyncRoutes";
 
 const router = Router();
 
+// GET /api/hubspot/connect - Generate HubSpot OAuth URL
 router.get("/connect", authenticate, (req: AuthRequest, res) => {
   try {
     const authUrl = HubSpotOAuthService.getAuthUrl(req.user!.id);
@@ -17,6 +18,7 @@ router.get("/connect", authenticate, (req: AuthRequest, res) => {
   }
 });
 
+// GET /api/hubspot/callback - OAuth callback to complete HubSpot connection
 router.get("/callback", async (req, res) => {
   const { code, state: userId } = req.query;
 
@@ -58,6 +60,7 @@ router.get("/callback", async (req, res) => {
   }
 });
 
+// POST /api/hubspot/disconnect - Remove HubSpot connection
 router.post("/disconnect", authenticate, async (req: AuthRequest, res) => {
   try {
     await HubSpotOAuthService.disconnectUser(req.user!.id);
@@ -67,6 +70,7 @@ router.post("/disconnect", authenticate, async (req: AuthRequest, res) => {
   }
 });
 
+// GET /api/hubspot/status - Check HubSpot connection status
 router.get("/status", authenticate, async (req: AuthRequest, res) => {
   try {
     const user = await prisma.user.findUnique({
@@ -82,6 +86,7 @@ router.get("/status", authenticate, async (req: AuthRequest, res) => {
   }
 });
 
+// Mount HubSpot sync routes
 router.use("/", hubspotSyncRoutes);
 
 export default router;

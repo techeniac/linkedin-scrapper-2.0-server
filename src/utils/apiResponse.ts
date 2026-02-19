@@ -1,6 +1,7 @@
 import { Response } from "express";
 import { ApiResponse } from "../types";
 
+// Send standardized success response
 export const successResponse = <T>(
   res: Response,
   data: T,
@@ -15,6 +16,7 @@ export const successResponse = <T>(
   res.status(statusCode).json(response);
 };
 
+// Send standardized error response
 export const errorResponse = (
   res: Response,
   message: string = "Error",

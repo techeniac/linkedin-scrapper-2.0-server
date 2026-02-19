@@ -11,6 +11,7 @@ import { authenticate } from "../middlewares/auth";
 
 const router = Router();
 
+// POST /api/auth/register - Register new user with validation
 router.post(
   "/register",
   [
@@ -24,6 +25,7 @@ router.post(
   register,
 );
 
+// POST /api/auth/login - Authenticate user and return JWT
 router.post(
   "/login",
   [
@@ -34,8 +36,10 @@ router.post(
   login,
 );
 
+// POST /api/auth/logout - Logout user (requires authentication)
 router.post("/logout", authenticate, logout);
 
+// GET /api/auth/profile - Get authenticated user profile
 router.get("/profile", authenticate, getProfile);
 
 export default router;

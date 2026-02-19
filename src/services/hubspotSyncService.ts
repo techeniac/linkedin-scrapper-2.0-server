@@ -6,6 +6,7 @@ import {
 } from "../types/hubspot.types";
 import logger from "../utils/logger";
 
+// Service for syncing LinkedIn data to HubSpot CRM
 export class HubSpotSyncService {
   private baseUrl = "https://api.hubapi.com";
   private headers: Record<string, string>;
@@ -17,6 +18,7 @@ export class HubSpotSyncService {
     };
   }
 
+  // Sync complete lead (contact + company + associations + notes)
   async syncFullLead(
     contact: ContactData,
     company: CompanyData | null,
@@ -27,6 +29,7 @@ export class HubSpotSyncService {
     let hubspotCompanyId: string | null = null;
     let companySyncError: string | null = null;
 
+    // Sync company if provided
     if (company) {
       try {
         logger.info(`[HubSpot] Upserting company: ${company.name}`);
@@ -39,11 +42,13 @@ export class HubSpotSyncService {
       }
     }
 
+    // Sync contact
     logger.info(`[HubSpot] Upserting contact...`);
     const contactResult = await this.upsertContact(contact, ownerId);
     const hubspotContactId = contactResult.id;
     logger.info(`[HubSpot] Contact upserted: ${hubspotContactId}`);
 
+    // Associate contact with company
     if (hubspotContactId && hubspotCompanyId) {
       try {
         logger.info(`[HubSpot] Creating association...`);
@@ -57,6 +62,7 @@ export class HubSpotSyncService {
       }
     }
 
+    // Add work history notes
     if (contact.experiences?.length) {
       try {
         logger.info(`[HubSpot] Adding notes...`);
@@ -75,6 +81,7 @@ export class HubSpotSyncService {
     };
   }
 
+  // Create or update HubSpot contact
   async upsertContact(contact: ContactData, ownerId?: string) {
     const handle = this.extractLinkedInHandle(
       contact.publicProfileUrl || contact.profileUrl,
@@ -84,6 +91,7 @@ export class HubSpotSyncService {
 
     if (!idValue) throw new Error("Email or LinkedIn Handle required");
 
+    // Map contact data to HubSpot properties
     const properties: any = {
       firstname: contact.name.split(" ")[0] || "Unknown",
       lastname: contact.name.split(" ").slice(1).join(" ") || "",
@@ -134,11 +142,13 @@ export class HubSpotSyncService {
     }
   }
 
+  // Create or update HubSpot company
   async upsertCompany(company: CompanyData, ownerId?: string) {
     logger.info(`[HubSpot] Company upsert starting: ${company.name}`);
 
     let linkedinId = company.linkedinCompanyId;
 
+    // Extract LinkedIn company ID from URL if not provided
     if (!linkedinId && company.companyUrl) {
       linkedinId = this.extractCompanySegment(company.companyUrl);
     }
@@ -154,6 +164,7 @@ export class HubSpotSyncService {
 
     const website = this.normalizeWebsite(company.website);
 
+    // Map company data to HubSpot properties
     const properties: any = {
       name: company.name || "Unknown Company",
       linkedin_company_id: linkedinId,
@@ -209,6 +220,7 @@ export class HubSpotSyncService {
     }
   }
 
+  // Create association between contact and company
   async associateContactToCompany(contactId: string, companyId: string) {
     const payload = {
       inputs: [
@@ -227,6 +239,7 @@ export class HubSpotSyncService {
     );
   }
 
+  // Search for contact by LinkedIn profile URL
   async findContactByProfileUrl(username: string): Promise<{
     id: string;
     firstname?: string;
@@ -288,6 +301,7 @@ export class HubSpotSyncService {
     }
   }
 
+  // Add work history as notes to contact
   async addRichNotes(contactId: string, contact: ContactData) {
     let noteContent = `<b>LinkedIn Sync Details</b><br/>`;
     noteContent += `Profile: ${contact.profileUrl}<br/>`;
@@ -320,12 +334,14 @@ export class HubSpotSyncService {
     });
   }
 
+  // Extract LinkedIn handle from profile URL
   private extractLinkedInHandle(url?: string | null): string | null {
     if (!url) return null;
     const match = url.match(/linkedin\.com\/in\/([^\/?#]+)/i);
     return match?.[1] || null;
   }
 
+  // Extract company segment from LinkedIn company URL
   private extractCompanySegment(url: string): string | null {
     try {
       const u = new URL(url);
@@ -338,6 +354,7 @@ export class HubSpotSyncService {
     return null;
   }
 
+  // Normalize website URL to domain format
   private normalizeWebsite(website?: string | null): string | null {
     if (!website) return null;
     try {

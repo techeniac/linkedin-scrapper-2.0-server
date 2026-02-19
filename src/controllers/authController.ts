@@ -3,6 +3,7 @@ import { AuthService } from "../services/authService";
 import { successResponse, errorResponse } from "../utils/apiResponse";
 import { LoginRequest, RegisterRequest } from "../types";
 
+// Register a new user
 export const register = async (
   req: Request,
   res: Response,
@@ -17,6 +18,7 @@ export const register = async (
   }
 };
 
+// Authenticate user and return JWT token
 export const login = async (
   req: Request,
   res: Response,
@@ -31,10 +33,12 @@ export const login = async (
   }
 };
 
+// Logout user (client-side token removal)
 export const logout = async (req: Request, res: Response): Promise<void> => {
   successResponse(res, null, "Logout successful");
 };
 
+// Get authenticated user profile
 export const getProfile = async (
   req: Request,
   res: Response,
