@@ -39,6 +39,7 @@ npm install
 
 cp .env.example .env
 
+```bash
 Edit .env with your credentials:
 PORT=3000
 NODE_ENV=development
@@ -50,11 +51,11 @@ RATE_LIMIT_MAX=100
 LOG_LEVEL=info
 
 # HubSpot OAuth
-
 HUBSPOT_CLIENT_ID=your-client-id
 HUBSPOT_CLIENT_SECRET=your-client-secret
 HUBSPOT_REDIRECT_URI=http://localhost:3000/api/hubspot/callback
 HUBSPOT_SCOPES=crm.objects.contacts.write crm.objects.contacts.read crm.objects.companies.write crm.objects.companies.read crm.objects.owners.read
+```
 
 3. **Run database migrations:**
 
@@ -70,21 +71,26 @@ npm run dev
 ```
 
 Scripts :
+
+```bash
 npm run dev - Start development server with hot reload
 npm run build - Build for production
 npm start - Start production server
 npm run prisma:generate - Generate Prisma client
 npm run prisma:migrate - Run database migrations
 npm run prisma:studio - Open Prisma Studio
+```
 
 API Endpoints :
-Authentication :
-POST /api/auth/register - Register new user
-POST /api/auth/login - Login user
-POST /api/auth/logout - Logout user
-GET /api/auth/profile - Get user profile
 
-    HubSpot Integration :
+```bash
+    #Authentication :
+    POST /api/auth/register - Register new user
+    POST /api/auth/login - Login user
+    POST /api/auth/logout - Logout user
+    GET /api/auth/profile - Get user profile
+
+    #HubSpot Integration :
     GET /api/hubspot/connect - Get HubSpot OAuth URL
     GET /api/hubspot/callback - OAuth callback
     POST /api/hubspot/disconnect - Disconnect HubSpot
@@ -92,11 +98,13 @@ GET /api/auth/profile - Get user profile
     POST /api/hubspot/sync-lead - Sync LinkedIn lead to HubSpot
     GET /api/hubspot/check-profile - Check if profile exists in HubSpot
 
-    Health
+    #Health
     GET /api/health - Health check
+```
 
 Project Structure
 
+```bash
 src/
 ├── config/ # Configuration files
 ├── controllers/ # Route controllers
@@ -108,6 +116,7 @@ src/
 ├── utils/ # Utility functions
 ├── app.ts # Express app setup
 └── server.ts # Server entry point
+```
 
 License
 ISC
