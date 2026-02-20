@@ -32,9 +32,11 @@ export const syncLead = async (
       user.hubspotOwnerId || undefined,
     );
 
-    console.log("CONTACT :", contact, "COMPANY :", company);
-
-    successResponse(res, result, "Lead synced successfully");
+    successResponse(
+      res,
+      { ...result, hubspotOwnerId: user.hubspotOwnerId },
+      "Lead synced successfully",
+    );
   } catch (error: any) {
     next(error);
   }
