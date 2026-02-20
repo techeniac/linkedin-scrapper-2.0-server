@@ -58,9 +58,12 @@ router.post(
       .trim()
       .isURL()
       .withMessage("Invalid website URL"),
-    body("company").optional().isObject(),
+    body("company")
+      .isObject()
+      .withMessage("company Associated with user profile is required"),
     body("company.name")
-      .optional({ values: "falsy" })
+      .notEmpty()
+      .withMessage("company name is required")
       .trim()
       .isLength({ max: 200 })
       .withMessage("company name too long"),
@@ -86,11 +89,6 @@ router.patch(
       .withMessage("username is required")
       .isLength({ max: 100 })
       .withMessage("username too long"),
-    body("name")
-      .optional({ values: "falsy" })
-      .trim()
-      .isLength({ min: 1, max: 200 })
-      .withMessage("name must be 1-200 characters"),
     body("email")
       .optional({ values: "falsy" })
       .trim()

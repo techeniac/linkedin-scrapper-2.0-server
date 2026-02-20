@@ -32,6 +32,8 @@ export const syncLead = async (
       user.hubspotOwnerId || undefined,
     );
 
+    console.log("CONTACT :", contact, "COMPANY :", company);
+
     successResponse(res, result, "Lead synced successfully");
   } catch (error: any) {
     next(error);
@@ -112,14 +114,7 @@ export const updateContact = async (
     const { username } = req.query;
 
     // Whitelist allowed properties
-    const allowedFields = [
-      "name",
-      "email",
-      "phone",
-      "owner",
-      "lifecycle",
-      "company",
-    ];
+    const allowedFields = ["email", "phone", "owner", "lifecycle", "company"];
     const updates: Record<string, string> = {};
 
     for (const field of allowedFields) {
