@@ -1,6 +1,8 @@
 import winston from "winston";
 
-// Configure Winston logger with file and console transports
+const isServerless = !!process.env.VERCEL;
+
+// Configure Winston logger
 const logger = winston.createLogger({
   level: process.env.LOG_LEVEL || "info",
   format: winston.format.combine(
@@ -8,16 +10,16 @@ const logger = winston.createLogger({
     winston.format.errors({ stack: true }),
     winston.format.json(),
   ),
-  transports: [
-    // Log errors to separate file
-    new winston.transports.File({ filename: "logs/error.log", level: "error" }),
-    // Log all levels to combined file
-    new winston.transports.File({ filename: "logs/combined.log" }),
-  ],
+  transports: isServerless
+    ? [new winston.transports.Console()]
+    : [
+        new winston.transports.File({ filename: "logs/error.log", level: "error" }),
+        new winston.transports.File({ filename: "logs/combined.log" }),
+      ],
 });
 
 // Add console logging in non-production environments
-if (process.env.NODE_ENV !== "production") {
+if (!isServerless && process.env.NODE_ENV !== "production") {
   logger.add(
     new winston.transports.Console({
       format: winston.format.combine(
