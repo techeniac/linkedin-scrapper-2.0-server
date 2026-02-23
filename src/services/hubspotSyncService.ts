@@ -474,4 +474,153 @@ export class HubSpotSyncService {
       { headers: this.headers },
     );
   }
+
+  async createNote(data: {
+    noteTitle?: string;
+    dealValue?: string;
+    nextStep?: string;
+    notes: string;
+    contactId?: string;
+    ownerId?: string;
+  }) {
+    let noteBody = data.notes;
+
+    if (data.noteTitle || data.dealValue || data.nextStep) {
+      noteBody = "";
+      if (data.noteTitle) noteBody += `<b>${data.noteTitle}</b><br/><br/>`;
+      if (data.dealValue)
+        noteBody += `<b>Deal Value:</b> ${data.dealValue}<br/>`;
+      if (data.nextStep)
+        noteBody += `<b>Next Step:</b> ${data.nextStep}<br/><br/>`;
+      noteBody += data.notes;
+    }
+
+    const properties: any = {
+      hs_note_body: noteBody,
+      hs_timestamp: new Date().toISOString(),
+      hubspot_owner_id: data.ownerId || undefined,
+    };
+
+    const payload = {
+      properties,
+      associations: [
+        {
+          to: { id: data.contactId },
+          types: [
+            { associationCategory: "HUBSPOT_DEFINED", associationTypeId: 202 },
+          ],
+        },
+      ],
+    };
+
+    try {
+      const response = await axios.post(
+        `${this.baseUrl}/crm/v3/objects/notes`,
+        payload,
+        { headers: this.headers },
+      );
+
+      logger.warn("Note creation response: ", response.data);
+
+      return response.data;
+    } catch (error: any) {
+      logger.error("Error creating HubSpot note:", error);
+      throw error;
+    }
+  }
+
+  private parseNoteBody(body: string) {
+    const titleMatch = body.match(/<b>(.*?)<\/b>/);
+    const dealMatch = body.match(/<b>Deal Value:<\/b>\s*([^<]+)/);
+    const nextStepMatch = body.match(/<b>Next Step:<\/b>\s*([^<]+)/);
+
+    let noteTitle = titleMatch?.[1] || null;
+    let dealValue = dealMatch?.[1]?.trim() || null;
+    let nextStep = nextStepMatch?.[1]?.trim() || null;
+
+    let notes = body;
+    if (titleMatch || dealMatch || nextStepMatch) {
+      notes = body
+        .replace(/<b>.*?<\/b><br><br>/, "")
+        .replace(/<b>Deal Value:<\/b>[^<]*<br>/, "")
+        .replace(/<b>Next Step:<\/b>[^<]*<br><br>/, "")
+        .trim();
+    }
+
+    return { noteTitle, dealValue, nextStep, notes };
+  }
+
+  async getNotesByContact(contactId: string) {
+    const response = await axios.get(
+      `${this.baseUrl}/crm/v4/objects/contacts/${contactId}/associations/notes`,
+      {
+        headers: this.headers,
+      },
+    );
+
+    const noteIds = response.data.results?.map((r: any) => r.toObjectId) || [];
+
+    if (noteIds.length === 0) return [];
+
+    const notesResponse = await axios.post(
+      `${this.baseUrl}/crm/v3/objects/notes/batch/read`,
+      {
+        properties: ["hs_note_body", "hs_timestamp", "hubspot_owner_id"],
+        inputs: noteIds.map((id: string) => ({ id })),
+      },
+      { headers: this.headers },
+    );
+
+    return (notesResponse.data.results || []).map((note: any) => {
+      const parsed = this.parseNoteBody(note.properties?.hs_note_body || "");
+      return {
+        id: note.id,
+        noteTitle: parsed.noteTitle,
+        dealValue: parsed.dealValue,
+        nextStep: parsed.nextStep,
+        notes: parsed.notes,
+        timestamp: note.properties?.hs_timestamp,
+        createdAt: note.createdAt,
+        updatedAt: note.updatedAt,
+      };
+    });
+  }
+
+  async updateNote(
+    noteId: string,
+    data: {
+      noteTitle?: string;
+      dealValue?: string;
+      nextStep?: string;
+      notes: string;
+    },
+  ) {
+    let noteBody = data.notes;
+
+    if (data.noteTitle || data.dealValue || data.nextStep) {
+      noteBody = "";
+      if (data.noteTitle) noteBody += `<b>${data.noteTitle}</b><br/><br/>`;
+      if (data.dealValue)
+        noteBody += `<b>Deal Value:</b> ${data.dealValue}<br/>`;
+      if (data.nextStep)
+        noteBody += `<b>Next Step:</b> ${data.nextStep}<br/><br/>`;
+      noteBody += data.notes;
+    }
+
+    await axios.patch(
+      `${this.baseUrl}/crm/v3/objects/notes/${noteId}`,
+      {
+        properties: {
+          hs_note_body: noteBody,
+        },
+      },
+      { headers: this.headers },
+    );
+  }
+
+  async deleteNote(noteId: string) {
+    await axios.delete(`${this.baseUrl}/crm/v3/objects/notes/${noteId}`, {
+      headers: this.headers,
+    });
+  }
 }

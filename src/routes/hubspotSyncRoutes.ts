@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { body, query } from "express-validator";
 import { authenticate } from "../middlewares/auth";
+import { createNote } from "../controllers/hubspotSyncController";
 import { validate } from "../middlewares/validateRequest";
 import {
   syncLead,
@@ -10,6 +11,49 @@ import {
 } from "../controllers/hubspotSyncController";
 
 const router = Router();
+
+import { getNotes, deleteNote } from "../controllers/hubspotSyncController";
+
+router.get(
+  "/notes",
+  authenticate,
+  [
+    query("contactId").trim().notEmpty().withMessage("contactId is required"),
+    validate,
+  ],
+  getNotes,
+);
+
+import { updateNote } from "../controllers/hubspotSyncController";
+
+router.patch(
+  "/notes/:noteId",
+  authenticate,
+  [
+    body("notes").trim().notEmpty().withMessage("notes is required"),
+    body("noteTitle").optional().trim().isLength({ max: 200 }),
+    body("dealValue").optional().trim().isLength({ max: 100 }),
+    body("nextStep").optional().trim().isLength({ max: 500 }),
+    validate,
+  ],
+  updateNote,
+);
+
+router.delete("/notes/:noteId", authenticate, deleteNote);
+
+router.post(
+  "/create-note",
+  authenticate,
+  [
+    body("notes").trim().notEmpty().withMessage("notes is required"),
+    body("contactId").trim().notEmpty().withMessage("contactId is required"),
+    body("noteTitle").optional().trim().isLength({ max: 200 }),
+    body("dealValue").optional().trim().isLength({ max: 100 }),
+    body("nextStep").optional().trim().isLength({ max: 500 }),
+    validate,
+  ],
+  createNote,
+);
 
 router.get(
   "/check-profile",

@@ -3,8 +3,9 @@ import { HubSpotSyncService } from "../services/hubspotSyncService";
 import { HubSpotOAuthService } from "../services/hubspotOAuthService";
 import { successResponse, errorResponse } from "../utils/apiResponse";
 import { AuthRequest } from "../types";
-import { SyncLeadRequest } from "../types/hubspot.types";
+import { SyncLeadRequest, CreateNoteRequest } from "../types/hubspot.types";
 import prisma from "../config/prisma";
+import logger from "../utils/logger";
 
 export const syncLead = async (
   req: AuthRequest,
@@ -73,6 +74,7 @@ export const checkProfile = async (
       successResponse(res, {
         exists: true,
         synced: true,
+        contactId: contact.id,
         name,
         email: contact.email,
         phone: contact.phone,
@@ -136,6 +138,133 @@ export const updateContact = async (
 
     await hubspotService.updateContactByUsername(username as string, updates);
     successResponse(res, null, "Contact updated successfully");
+  } catch (error: any) {
+    next(error);
+  }
+};
+
+export const createNote = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const {
+      noteTitle,
+      dealValue,
+      nextStep,
+      notes,
+      contactId,
+    }: CreateNoteRequest = req.body;
+
+    const userId = req.user!.id;
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+
+    if (!user?.hubspotAccessToken || !user?.hubspotRefreshToken) {
+      errorResponse(res, "HubSpot connection required", 400);
+      return;
+    }
+
+    const accessToken = await HubSpotOAuthService.getValidAccessToken(userId);
+    const hubspotService = new HubSpotSyncService(accessToken);
+
+    const result = await hubspotService.createNote({
+      noteTitle,
+      dealValue,
+      nextStep,
+      notes,
+      contactId,
+      ownerId: user.hubspotOwnerId || undefined,
+    });
+
+    successResponse(res, result.id, "Note created successfully");
+  } catch (error: any) {
+    next(error);
+  }
+};
+
+export const getNotes = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const { contactId } = req.query;
+
+    const userId = req.user!.id;
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+
+    if (!user?.hubspotAccessToken || !user?.hubspotRefreshToken) {
+      errorResponse(res, "HubSpot connection required", 400);
+      return;
+    }
+
+    const accessToken = await HubSpotOAuthService.getValidAccessToken(userId);
+    const hubspotService = new HubSpotSyncService(accessToken);
+
+    const notes = await hubspotService.getNotesByContact(contactId as string);
+
+    successResponse(res, notes, "Notes fetched successfully");
+  } catch (error: any) {
+    next(error);
+  }
+};
+
+export const updateNote = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const { noteId } = req.params;
+    const { noteTitle, dealValue, nextStep, notes } = req.body;
+
+    const userId = req.user!.id;
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+
+    if (!user?.hubspotAccessToken || !user?.hubspotRefreshToken) {
+      errorResponse(res, "HubSpot connection required", 400);
+      return;
+    }
+
+    const accessToken = await HubSpotOAuthService.getValidAccessToken(userId);
+    const hubspotService = new HubSpotSyncService(accessToken);
+
+    await hubspotService.updateNote(noteId, {
+      noteTitle,
+      dealValue,
+      nextStep,
+      notes,
+    });
+
+    successResponse(res, null, "Note updated successfully");
+  } catch (error: any) {
+    next(error);
+  }
+};
+
+export const deleteNote = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const { noteId } = req.params;
+
+    const userId = req.user!.id;
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+
+    if (!user?.hubspotAccessToken || !user?.hubspotRefreshToken) {
+      errorResponse(res, "HubSpot connection required", 400);
+      return;
+    }
+
+    const accessToken = await HubSpotOAuthService.getValidAccessToken(userId);
+    const hubspotService = new HubSpotSyncService(accessToken);
+
+    await hubspotService.deleteNote(noteId);
+
+    successResponse(res, null, "Note deleted successfully");
   } catch (error: any) {
     next(error);
   }

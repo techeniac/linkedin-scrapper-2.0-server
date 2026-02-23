@@ -63,3 +63,12 @@ export interface SyncLeadResponse {
   companyId?: string | null;
   companySyncError?: string | null;
 }
+
+export interface CreateNoteRequest {
+  noteTitle?: string;
+  dealValue?: string;
+  nextStep?: string;
+  notes: string;
+  contactId?: string;
+  ownerId?: string;
+}
