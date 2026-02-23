@@ -14,6 +14,7 @@ const router = Router();
 
 import { getNotes, deleteNote } from "../controllers/hubspotSyncController";
 
+// GET /api/hubspot/notes - Get all notes for a contact
 router.get(
   "/notes",
   authenticate,
@@ -26,6 +27,7 @@ router.get(
 
 import { updateNote } from "../controllers/hubspotSyncController";
 
+// PATCH /api/hubspot/notes/:noteId - Update a note
 router.patch(
   "/notes/:noteId",
   authenticate,
@@ -39,8 +41,10 @@ router.patch(
   updateNote,
 );
 
+// DELETE /api/hubspot/notes/:noteId - Delete a note
 router.delete("/notes/:noteId", authenticate, deleteNote);
 
+// POST /api/hubspot/create-note - Create a new note
 router.post(
   "/create-note",
   authenticate,
@@ -55,6 +59,7 @@ router.post(
   createNote,
 );
 
+// GET /api/hubspot/check-profile - Check if LinkedIn profile exists in HubSpot
 router.get(
   "/check-profile",
   authenticate,
@@ -70,6 +75,7 @@ router.get(
   checkProfile,
 );
 
+// POST /api/hubspot/sync-lead - Sync LinkedIn lead to HubSpot
 router.post(
   "/sync-lead",
   authenticate,
@@ -121,8 +127,10 @@ router.post(
   syncLead,
 );
 
+// GET /api/hubspot/property-options - Get HubSpot property options
 router.get("/property-options", authenticate, getPropertyOptions);
 
+// PATCH /api/hubspot/update-contact - Update HubSpot contact
 router.patch(
   "/update-contact",
   authenticate,

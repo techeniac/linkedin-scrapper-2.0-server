@@ -392,7 +392,7 @@ export class HubSpotSyncService {
     return null;
   }
 
-  // Normalize website URL to domain format
+  // Normalize website URL to domain format (removes protocol and www)
   private normalizeWebsite(website?: string | null): string | null {
     if (!website) return null;
     try {
@@ -475,6 +475,7 @@ export class HubSpotSyncService {
     );
   }
 
+  // Create a note associated with a HubSpot contact
   async createNote(data: {
     noteTitle?: string;
     dealValue?: string;
@@ -485,6 +486,7 @@ export class HubSpotSyncService {
   }) {
     let noteBody = data.notes;
 
+    // Format note with optional structured fields
     if (data.noteTitle || data.dealValue || data.nextStep) {
       noteBody = "";
       if (data.noteTitle) noteBody += `<b>${data.noteTitle}</b><br/><br/>`;
@@ -529,6 +531,7 @@ export class HubSpotSyncService {
     }
   }
 
+  // Parse note body HTML to extract structured fields
   private parseNoteBody(body: string) {
     const titleMatch = body.match(/<b>(.*?)<\/b>/);
     const dealMatch = body.match(/<b>Deal Value:<\/b>\s*([^<]+)/);
@@ -550,6 +553,7 @@ export class HubSpotSyncService {
     return { noteTitle, dealValue, nextStep, notes };
   }
 
+  // Get all notes associated with a contact
   async getNotesByContact(contactId: string) {
     const response = await axios.get(
       `${this.baseUrl}/crm/v4/objects/contacts/${contactId}/associations/notes`,
@@ -586,6 +590,7 @@ export class HubSpotSyncService {
     });
   }
 
+  // Update an existing note
   async updateNote(
     noteId: string,
     data: {
@@ -597,6 +602,7 @@ export class HubSpotSyncService {
   ) {
     let noteBody = data.notes;
 
+    // Format note with optional structured fields
     if (data.noteTitle || data.dealValue || data.nextStep) {
       noteBody = "";
       if (data.noteTitle) noteBody += `<b>${data.noteTitle}</b><br/><br/>`;
@@ -618,6 +624,7 @@ export class HubSpotSyncService {
     );
   }
 
+  // Delete a note
   async deleteNote(noteId: string) {
     await axios.delete(`${this.baseUrl}/crm/v3/objects/notes/${noteId}`, {
       headers: this.headers,

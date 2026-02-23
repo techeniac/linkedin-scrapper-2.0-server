@@ -8,6 +8,7 @@ import {
   HUBSPOT_SCOPES,
 } from "../config/env";
 
+// Default HubSpot OAuth scopes for CRM access
 const DEFAULT_SCOPES = [
   "crm.objects.contacts.write",
   "crm.objects.contacts.read",
@@ -62,6 +63,7 @@ export class HubSpotOAuthService {
     return oauthState.userId;
   }
 
+  // Exchange authorization code for access and refresh tokens
   static async exchangeCodeForTokens(code: string) {
     const response = await axios.post(
       "https://api.hubapi.com/oauth/v1/token",
@@ -82,6 +84,7 @@ export class HubSpotOAuthService {
     };
   }
 
+  // Refresh expired access token using refresh token
   static async refreshAccessToken(refreshToken: string) {
     const response = await axios.post(
       "https://api.hubapi.com/oauth/v1/token",
@@ -101,6 +104,7 @@ export class HubSpotOAuthService {
     };
   }
 
+  // Get HubSpot owner ID by email address
   static async getOwnerIdByEmail(
     accessToken: string,
     email: string,
@@ -121,6 +125,7 @@ export class HubSpotOAuthService {
     }
   }
 
+  // Connect user to HubSpot by exchanging code and storing tokens
   static async connectUser(userId: string, code: string) {
     const user = await prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new Error("User not found");
@@ -145,6 +150,7 @@ export class HubSpotOAuthService {
     return { success: true, ownerId };
   }
 
+  // Get valid access token, refreshing if expired
   static async getValidAccessToken(userId: string): Promise<string> {
     const user = await prisma.user.findUnique({ where: { id: userId } });
     if (!user?.hubspotAccessToken) throw new Error("HubSpot not connected");
@@ -168,6 +174,7 @@ export class HubSpotOAuthService {
     return user.hubspotAccessToken;
   }
 
+  // Disconnect user from HubSpot by removing tokens
   static async disconnectUser(userId: string) {
     await prisma.user.update({
       where: { id: userId },

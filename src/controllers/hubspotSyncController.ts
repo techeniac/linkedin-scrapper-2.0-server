@@ -7,6 +7,7 @@ import { SyncLeadRequest, CreateNoteRequest } from "../types/hubspot.types";
 import prisma from "../config/prisma";
 import logger from "../utils/logger";
 
+// Sync LinkedIn lead (contact + company) to HubSpot
 export const syncLead = async (
   req: AuthRequest,
   res: Response,
@@ -43,6 +44,7 @@ export const syncLead = async (
   }
 };
 
+// Check if LinkedIn profile exists in HubSpot
 export const checkProfile = async (
   req: AuthRequest,
   res: Response,
@@ -92,6 +94,7 @@ export const checkProfile = async (
   }
 };
 
+// Get HubSpot property options (owners and lifecycle stages)
 export const getPropertyOptions = async (
   req: AuthRequest,
   res: Response,
@@ -109,6 +112,7 @@ export const getPropertyOptions = async (
   }
 };
 
+// Update HubSpot contact by LinkedIn username
 export const updateContact = async (
   req: AuthRequest,
   res: Response,
@@ -143,6 +147,7 @@ export const updateContact = async (
   }
 };
 
+// Create a note associated with a HubSpot contact
 export const createNote = async (
   req: AuthRequest,
   res: Response,
@@ -183,6 +188,7 @@ export const createNote = async (
   }
 };
 
+// Get all notes associated with a HubSpot contact
 export const getNotes = async (
   req: AuthRequest,
   res: Response,
@@ -210,6 +216,7 @@ export const getNotes = async (
   }
 };
 
+// Update an existing HubSpot note
 export const updateNote = async (
   req: AuthRequest,
   res: Response,
@@ -243,6 +250,7 @@ export const updateNote = async (
   }
 };
 
+// Delete a HubSpot note
 export const deleteNote = async (
   req: AuthRequest,
   res: Response,
