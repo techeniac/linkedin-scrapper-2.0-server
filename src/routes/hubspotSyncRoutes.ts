@@ -1,8 +1,19 @@
 import { Router } from "express";
 import { body, query } from "express-validator";
 import { authenticate } from "../middlewares/auth";
-import { createNote } from "../controllers/hubspotSyncController";
+import {
+  createNote,
+  getNotes,
+  deleteNote,
+  updateNote,
+} from "../controllers/hubspotSyncController";
 import { validate } from "../middlewares/validateRequest";
+import {
+  getTasks,
+  createTask,
+  updateTask,
+  deleteTask,
+} from "../controllers/taskController";
 import {
   syncLead,
   checkProfile,
@@ -12,7 +23,66 @@ import {
 
 const router = Router();
 
-import { getNotes, deleteNote } from "../controllers/hubspotSyncController";
+router.get(
+  "/tasks",
+  authenticate,
+  [
+    query("contactId").trim().notEmpty().withMessage("contactId is required"),
+    validate,
+  ],
+  getTasks,
+);
+
+// POST /api/hubspot/create-task - Create a new task
+router.post(
+  "/create-task",
+  authenticate,
+  [
+    body("taskName").trim().notEmpty().withMessage("taskName is required"),
+    body("priority")
+      .isIn(["None", "Low", "Medium", "High"])
+      .withMessage("priority must be None, Low, Medium, or High"),
+    body("status").trim().notEmpty().withMessage("status is required"),
+    body("dueDate").optional().isISO8601().withMessage("Invalid date format"),
+    body("time")
+      .optional()
+      .matches(/^\d{2}:\d{2}$/)
+      .withMessage("Invalid time format (HH:mm)"),
+    body("assignedTo").optional().trim(),
+    body("comment").optional().trim(),
+    body("contactId").optional().trim(),
+    validate,
+  ],
+  createTask,
+);
+
+// PATCH /api/hubspot/tasks/:taskId - Update a task
+router.patch(
+  "/tasks/:taskId",
+  authenticate,
+  [
+    body("taskName").trim().notEmpty().withMessage("taskName is required"),
+    body("priority")
+      .isIn(["None", "Low", "Medium", "High"])
+      .withMessage("priority must be None, Low, Medium, or High"),
+    body("status").trim().notEmpty().withMessage("status is required"),
+    body("dueDate").optional().isISO8601().withMessage("Invalid date format"),
+    body("time")
+      .optional()
+      .matches(/^\d{2}:\d{2}$/)
+      .withMessage("Invalid time format (HH:mm)"),
+    body("assignedTo")
+      .notEmpty()
+      .trim()
+      .withMessage("Please assign this task to someone"),
+    body("comment").optional().trim(),
+    validate,
+  ],
+  updateTask,
+);
+
+// DELETE /api/hubspot/tasks/:taskId - Delete a task
+router.delete("/tasks/:taskId", authenticate, deleteTask);
 
 // GET /api/hubspot/notes - Get all notes for a contact
 router.get(
@@ -24,8 +94,6 @@ router.get(
   ],
   getNotes,
 );
-
-import { updateNote } from "../controllers/hubspotSyncController";
 
 // PATCH /api/hubspot/notes/:noteId - Update a note
 router.patch(
