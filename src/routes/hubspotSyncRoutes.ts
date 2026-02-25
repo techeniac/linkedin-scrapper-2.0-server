@@ -24,6 +24,7 @@ import {
 
 const router = Router();
 
+// GET /api/hubspot/tasks - Get all tasks for a contact
 router.get(
   "/tasks",
   authenticate,
