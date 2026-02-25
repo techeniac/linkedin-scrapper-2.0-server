@@ -1,4 +1,5 @@
 import axios from "axios";
+import sanitizeHtml from "sanitize-html";
 import {
   ContactData,
   CompanyData,
@@ -19,6 +20,18 @@ export class HubSpotSyncService {
       "Content-Type": "application/json",
       Authorization: `Bearer ${accessToken}`,
     };
+  }
+
+  // Strip all HTML tags and normalize whitespace for note fields
+  private sanitizeNoteText(text: string | null | undefined): string | null {
+    if (!text) return null;
+
+    const cleaned = sanitizeHtml(text, {
+      allowedTags: [],
+      allowedAttributes: {},
+    });
+
+    return cleaned.replace(/\s+/g, " ").trim() || null;
   }
 
   // Sync complete lead (contact + company + associations + notes)
@@ -100,7 +113,7 @@ export class HubSpotSyncService {
       lastname: contact.name.split(" ").slice(1).join(" ") || "",
       jobtitle: contact.selectedRole || contact.headline || "",
       company: contact.selectedCompany || "",
-      lifecyclestage: "lead",
+      lifecyclestage: "",
       hs_linkedin_url: contact.profileUrl,
     };
 
@@ -272,6 +285,9 @@ export class HubSpotSyncService {
     phone?: string;
     lifecycleStage?: string;
     lastmodifieddate?: string;
+    leadStatus?: string;
+    leadSource?: string;
+    connectedOnSource?: string;
   } | null> {
     if (!username || !username.trim()) return null;
     const searchPattern = `/in/${username.trim()}`;
@@ -302,6 +318,9 @@ export class HubSpotSyncService {
             "lifecyclestage",
             "hs_object_id",
             "hs_linkedin_url",
+            "hs_lead_status",
+            "approach",
+            "contact_source",
           ],
         },
         { headers: this.headers },
@@ -334,6 +353,9 @@ export class HubSpotSyncService {
         owner: ownerName || undefined,
         lifecycleStage: matched.properties?.lifecyclestage,
         lastmodifieddate: matched.properties?.lastmodifieddate,
+        leadStatus: matched.properties?.hs_lead_status,
+        leadSource: matched.properties?.approach,
+        connectedOnSource: matched.properties?.contact_source,
       };
     } catch (err: any) {
       if (err.response?.status === 404 || err.response?.status === 400)
@@ -412,8 +434,10 @@ export class HubSpotSyncService {
   async getPropertyOptions(): Promise<{
     owners: Array<{ label: string; value: string }>;
     lifecycleStages: Array<{ label: string; value: string }>;
+    leadStatuses: Array<{ label: string; value: string }>;
+    leadSources: Array<{ label: string; value: string }>;
+    connectedOnSources: Array<{ label: string; value: string }>;
   }> {
-    // Fetch owners
     const ownersResp = await axios.get(`${this.baseUrl}/crm/v3/owners`, {
       headers: this.headers,
     });
@@ -425,7 +449,6 @@ export class HubSpotSyncService {
       value: String(o.id),
     }));
 
-    // Fetch lifecycle stages
     const lifecycleResp = await axios.get(
       `${this.baseUrl}/crm/v3/properties/contact/lifecyclestage`,
       { headers: this.headers },
@@ -437,7 +460,46 @@ export class HubSpotSyncService {
       }),
     );
 
-    return { owners, lifecycleStages };
+    const leadStatusResp = await axios.get(
+      `${this.baseUrl}/crm/v3/properties/contact/hs_lead_status`,
+      { headers: this.headers },
+    );
+    const leadStatuses = (leadStatusResp.data?.options || []).map(
+      (opt: any) => ({
+        label: opt.label,
+        value: opt.value,
+      }),
+    );
+
+    const leadSourceResp = await axios.get(
+      `${this.baseUrl}/crm/v3/properties/contact/approach`,
+      { headers: this.headers },
+    );
+    const leadSources = (leadSourceResp.data?.options || []).map(
+      (opt: any) => ({
+        label: opt.label,
+        value: opt.value,
+      }),
+    );
+
+    const connectedOnResp = await axios.get(
+      `${this.baseUrl}/crm/v3/properties/contact/contact_source`,
+      { headers: this.headers },
+    );
+    const connectedOnSources = (connectedOnResp.data?.options || []).map(
+      (opt: any) => ({
+        label: opt.label,
+        value: opt.value,
+      }),
+    );
+
+    return {
+      owners,
+      lifecycleStages,
+      leadStatuses,
+      leadSources,
+      connectedOnSources,
+    };
   }
 
   // Update contact by LinkedIn username
@@ -449,10 +511,12 @@ export class HubSpotSyncService {
       phone?: string;
       owner?: string;
       lifecycle?: string;
+      leadStatus?: string;
+      leadSource?: string;
+      connectedOnSource?: string;
       company?: string;
     },
   ): Promise<void> {
-    // Find contact first
     const contact = await this.findContactByProfileUrl(username);
     if (!contact) {
       throw new Error("Contact not found in HubSpot");
@@ -469,6 +533,10 @@ export class HubSpotSyncService {
     if (updates.phone) properties.phone = updates.phone;
     if (updates.owner) properties.hubspot_owner_id = updates.owner;
     if (updates.lifecycle) properties.lifecyclestage = updates.lifecycle;
+    if (updates.leadStatus) properties.hs_lead_status = updates.leadStatus;
+    if (updates.leadSource) properties.approach = updates.leadSource;
+    if (updates.connectedOnSource)
+      properties.contact_source = updates.connectedOnSource;
     if (updates.company) properties.company = updates.company;
 
     await axios.patch(
@@ -580,12 +648,18 @@ export class HubSpotSyncService {
 
     return (notesResponse.data.results || []).map((note: any) => {
       const parsed = this.parseNoteBody(note.properties?.hs_note_body || "");
+
+      const sanitizedTitle = this.sanitizeNoteText(parsed.noteTitle);
+      const sanitizedDealValue = this.sanitizeNoteText(parsed.dealValue);
+      const sanitizedNextStep = this.sanitizeNoteText(parsed.nextStep);
+      const sanitizedNotes = this.sanitizeNoteText(parsed.notes);
+
       return {
         id: note.id,
-        noteTitle: parsed.noteTitle,
-        dealValue: parsed.dealValue,
-        nextStep: parsed.nextStep,
-        notes: parsed.notes,
+        noteTitle: sanitizedTitle,
+        dealValue: sanitizedDealValue,
+        nextStep: sanitizedNextStep,
+        notes: sanitizedNotes, // <- this will now be plain text, no HTML tags
         timestamp: note.properties?.hs_timestamp,
         createdAt: note.createdAt,
         updatedAt: note.updatedAt,

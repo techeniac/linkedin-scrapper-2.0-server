@@ -1,11 +1,8 @@
 import { Response, NextFunction } from "express";
-import { HubSpotSyncService } from "../services/hubspotSyncService";
-import { HubSpotOAuthService } from "../services/hubspotOAuthService";
+import { HubSpotContextService } from "../services/hubspotContextService";
 import { successResponse, errorResponse } from "../utils/apiResponse";
 import { AuthRequest } from "../types";
 import { SyncLeadRequest, CreateNoteRequest } from "../types/hubspot.types";
-import prisma from "../config/prisma";
-import logger from "../utils/logger";
 
 // Sync LinkedIn lead (contact + company) to HubSpot
 export const syncLead = async (
@@ -16,27 +13,18 @@ export const syncLead = async (
   try {
     const { contact, company }: SyncLeadRequest = req.body;
 
-    const userId = req.user!.id;
-    const user = await prisma.user.findUnique({ where: { id: userId } });
+    const { userId, ownerId, syncService } =
+      await HubSpotContextService.getContext(req.user!.id);
 
-    // Check HubSpot connection via access token
-    if (!user?.hubspotAccessToken || !user?.hubspotRefreshToken) {
-      errorResponse(res, "HubSpot connection required", 400);
-      return;
-    }
-
-    const accessToken = await HubSpotOAuthService.getValidAccessToken(userId);
-    const hubspotService = new HubSpotSyncService(accessToken);
-
-    const result = await hubspotService.syncFullLead(
+    const result = await syncService.syncFullLead(
       contact,
       company || null,
-      user.hubspotOwnerId || undefined,
+      ownerId,
     );
 
     successResponse(
       res,
-      { ...result, hubspotOwnerId: user.hubspotOwnerId },
+      { ...result, hubspotOwnerId: ownerId },
       "Lead synced successfully",
     );
   } catch (error: any) {
@@ -53,19 +41,10 @@ export const checkProfile = async (
   try {
     const { username } = req.query;
 
-    const userId = req.user!.id;
-    const user = await prisma.user.findUnique({ where: { id: userId } });
+    const { userId, ownerId, syncService } =
+      await HubSpotContextService.getContext(req.user!.id);
 
-    // Check HubSpot connection via access token
-    if (!user?.hubspotAccessToken || !user?.hubspotRefreshToken) {
-      successResponse(res, { exists: false, synced: false });
-      return;
-    }
-
-    const accessToken = await HubSpotOAuthService.getValidAccessToken(userId);
-    const hubspotService = new HubSpotSyncService(accessToken);
-
-    const contact = await hubspotService.findContactByProfileUrl(
+    const contact = await syncService.findContactByProfileUrl(
       username as string,
     );
 
@@ -84,6 +63,9 @@ export const checkProfile = async (
         owner: contact.owner,
         lifecycleStage: contact.lifecycleStage,
         syncedAt: contact.lastmodifieddate,
+        leadStatus: contact.leadStatus,
+        leadSource: contact.leadSource,
+        connectedOnSource: contact.connectedOnSource,
       });
       return;
     }
@@ -101,11 +83,10 @@ export const getPropertyOptions = async (
   next: NextFunction,
 ): Promise<void> => {
   try {
-    const userId = req.user!.id;
-    const accessToken = await HubSpotOAuthService.getValidAccessToken(userId);
-    const hubspotService = new HubSpotSyncService(accessToken);
+    const { userId, ownerId, syncService } =
+      await HubSpotContextService.getContext(req.user!.id);
 
-    const options = await hubspotService.getPropertyOptions();
+    const options = await syncService.getPropertyOptions();
     successResponse(res, options, "Property options fetched successfully");
   } catch (error: any) {
     next(error);
@@ -122,7 +103,18 @@ export const updateContact = async (
     const { username } = req.query;
 
     // Whitelist allowed properties
-    const allowedFields = ["email", "phone", "owner", "lifecycle", "company"];
+    const allowedFields = [
+      "name",
+      "email",
+      "phone",
+      "owner",
+      "lifecycle",
+      "company",
+      "leadStatus",
+      "leadSource",
+      "connectedOnSource",
+    ];
+
     const updates: Record<string, string> = {};
 
     for (const field of allowedFields) {
@@ -136,11 +128,10 @@ export const updateContact = async (
       return;
     }
 
-    const userId = req.user!.id;
-    const accessToken = await HubSpotOAuthService.getValidAccessToken(userId);
-    const hubspotService = new HubSpotSyncService(accessToken);
+    const { userId, ownerId, syncService } =
+      await HubSpotContextService.getContext(req.user!.id);
 
-    await hubspotService.updateContactByUsername(username as string, updates);
+    await syncService.updateContactByUsername(username as string, updates);
     successResponse(res, null, "Contact updated successfully");
   } catch (error: any) {
     next(error);
@@ -162,24 +153,16 @@ export const createNote = async (
       contactId,
     }: CreateNoteRequest = req.body;
 
-    const userId = req.user!.id;
-    const user = await prisma.user.findUnique({ where: { id: userId } });
+    const { userId, ownerId, syncService } =
+      await HubSpotContextService.getContext(req.user!.id);
 
-    if (!user?.hubspotAccessToken || !user?.hubspotRefreshToken) {
-      errorResponse(res, "HubSpot connection required", 400);
-      return;
-    }
-
-    const accessToken = await HubSpotOAuthService.getValidAccessToken(userId);
-    const hubspotService = new HubSpotSyncService(accessToken);
-
-    const result = await hubspotService.createNote({
+    const result = await syncService.createNote({
       noteTitle,
       dealValue,
       nextStep,
       notes,
       contactId,
-      ownerId: user.hubspotOwnerId || undefined,
+      ownerId: ownerId,
     });
 
     successResponse(res, result.id, "Note created successfully");
@@ -197,18 +180,10 @@ export const getNotes = async (
   try {
     const { contactId } = req.query;
 
-    const userId = req.user!.id;
-    const user = await prisma.user.findUnique({ where: { id: userId } });
+    const { userId, ownerId, syncService } =
+      await HubSpotContextService.getContext(req.user!.id);
 
-    if (!user?.hubspotAccessToken || !user?.hubspotRefreshToken) {
-      errorResponse(res, "HubSpot connection required", 400);
-      return;
-    }
-
-    const accessToken = await HubSpotOAuthService.getValidAccessToken(userId);
-    const hubspotService = new HubSpotSyncService(accessToken);
-
-    const notes = await hubspotService.getNotesByContact(contactId as string);
+    const notes = await syncService.getNotesByContact(contactId as string);
 
     successResponse(res, notes, "Notes fetched successfully");
   } catch (error: any) {
@@ -226,18 +201,10 @@ export const updateNote = async (
     const { noteId } = req.params;
     const { noteTitle, dealValue, nextStep, notes } = req.body;
 
-    const userId = req.user!.id;
-    const user = await prisma.user.findUnique({ where: { id: userId } });
+    const { userId, ownerId, syncService } =
+      await HubSpotContextService.getContext(req.user!.id);
 
-    if (!user?.hubspotAccessToken || !user?.hubspotRefreshToken) {
-      errorResponse(res, "HubSpot connection required", 400);
-      return;
-    }
-
-    const accessToken = await HubSpotOAuthService.getValidAccessToken(userId);
-    const hubspotService = new HubSpotSyncService(accessToken);
-
-    await hubspotService.updateNote(noteId, {
+    await syncService.updateNote(noteId, {
       noteTitle,
       dealValue,
       nextStep,
@@ -259,18 +226,10 @@ export const deleteNote = async (
   try {
     const { noteId } = req.params;
 
-    const userId = req.user!.id;
-    const user = await prisma.user.findUnique({ where: { id: userId } });
+    const { userId, ownerId, syncService } =
+      await HubSpotContextService.getContext(req.user!.id);
 
-    if (!user?.hubspotAccessToken || !user?.hubspotRefreshToken) {
-      errorResponse(res, "HubSpot connection required", 400);
-      return;
-    }
-
-    const accessToken = await HubSpotOAuthService.getValidAccessToken(userId);
-    const hubspotService = new HubSpotSyncService(accessToken);
-
-    await hubspotService.deleteNote(noteId);
+    await syncService.deleteNote(noteId);
 
     successResponse(res, null, "Note deleted successfully");
   } catch (error: any) {

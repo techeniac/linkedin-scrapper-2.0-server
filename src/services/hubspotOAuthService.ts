@@ -1,5 +1,6 @@
 import axios from "axios";
 import crypto from "crypto";
+import { UserRepository } from "../repositories/userRepository";
 import prisma from "../config/prisma";
 import {
   HUBSPOT_CLIENT_ID,
@@ -127,7 +128,7 @@ export class HubSpotOAuthService {
 
   // Connect user to HubSpot by exchanging code and storing tokens
   static async connectUser(userId: string, code: string) {
-    const user = await prisma.user.findUnique({ where: { id: userId } });
+    const user = await UserRepository.findById(userId);
     if (!user) throw new Error("User not found");
 
     const tokens = await this.exchangeCodeForTokens(code);
@@ -137,14 +138,11 @@ export class HubSpotOAuthService {
     );
     const expiresAt = new Date(Date.now() + tokens.expiresIn * 1000);
 
-    await prisma.user.update({
-      where: { id: userId },
-      data: {
-        hubspotAccessToken: tokens.accessToken,
-        hubspotRefreshToken: tokens.refreshToken,
-        hubspotOwnerId: ownerId,
-        hubspotTokenExpiresAt: expiresAt,
-      },
+    await UserRepository.updateHubSpotTokens(userId, {
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      ownerId: ownerId,
+      expiresAt: expiresAt,
     });
 
     return { success: true, ownerId };
@@ -152,20 +150,18 @@ export class HubSpotOAuthService {
 
   // Get valid access token, refreshing if expired
   static async getValidAccessToken(userId: string): Promise<string> {
-    const user = await prisma.user.findUnique({ where: { id: userId } });
+    const user = await UserRepository.findById(userId);
     if (!user?.hubspotAccessToken) throw new Error("HubSpot not connected");
 
     if (user.hubspotTokenExpiresAt && user.hubspotTokenExpiresAt < new Date()) {
       const tokens = await this.refreshAccessToken(user.hubspotRefreshToken!);
       const expiresAt = new Date(Date.now() + tokens.expiresIn * 1000);
 
-      await prisma.user.update({
-        where: { id: userId },
-        data: {
-          hubspotAccessToken: tokens.accessToken,
-          hubspotRefreshToken: tokens.refreshToken,
-          hubspotTokenExpiresAt: expiresAt,
-        },
+      await UserRepository.updateHubSpotTokens(userId, {
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        ownerId: user.hubspotOwnerId || null,
+        expiresAt,
       });
 
       return tokens.accessToken;

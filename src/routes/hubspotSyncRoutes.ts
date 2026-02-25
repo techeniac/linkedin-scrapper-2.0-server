@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { userAwareLimiter } from "../middlewares/rateLimiter";
 import { body, query } from "express-validator";
 import { authenticate } from "../middlewares/auth";
 import {
@@ -37,6 +38,7 @@ router.get(
 router.post(
   "/create-task",
   authenticate,
+  userAwareLimiter,
   [
     body("taskName").trim().notEmpty().withMessage("taskName is required"),
     body("priority")
@@ -60,6 +62,7 @@ router.post(
 router.patch(
   "/tasks/:taskId",
   authenticate,
+  userAwareLimiter,
   [
     body("taskName").trim().notEmpty().withMessage("taskName is required"),
     body("priority")
@@ -88,6 +91,7 @@ router.delete("/tasks/:taskId", authenticate, deleteTask);
 router.get(
   "/notes",
   authenticate,
+  userAwareLimiter,
   [
     query("contactId").trim().notEmpty().withMessage("contactId is required"),
     validate,
@@ -99,6 +103,7 @@ router.get(
 router.patch(
   "/notes/:noteId",
   authenticate,
+  userAwareLimiter,
   [
     body("notes").trim().notEmpty().withMessage("notes is required"),
     body("noteTitle").optional().trim().isLength({ max: 200 }),
@@ -116,6 +121,7 @@ router.delete("/notes/:noteId", authenticate, deleteNote);
 router.post(
   "/create-note",
   authenticate,
+  userAwareLimiter,
   [
     body("notes").trim().notEmpty().withMessage("notes is required"),
     body("contactId").trim().notEmpty().withMessage("contactId is required"),
@@ -147,6 +153,7 @@ router.get(
 router.post(
   "/sync-lead",
   authenticate,
+  userAwareLimiter,
   [
     body("contact").isObject().withMessage("contact object is required"),
     body("contact.name")
@@ -202,6 +209,7 @@ router.get("/property-options", authenticate, getPropertyOptions);
 router.patch(
   "/update-contact",
   authenticate,
+  userAwareLimiter,
   [
     query("username")
       .trim()
