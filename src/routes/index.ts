@@ -2,20 +2,12 @@ import { Router } from "express";
 import healthRoutes from "./healthRoutes";
 import authRoutes from "./authRoutes";
 import hubspotRoutes from "./hubspotRoutes";
-import rateLimit from "express-rate-limit";
-import { RATE_LIMIT_WINDOW, RATE_LIMIT_MAX } from "../config/env";
+import { apiLimiter } from "../middlewares/rateLimiter";
 
 const router = Router();
 
-// Configure rate limiting to prevent abuse
-const limiter = rateLimit({
-  windowMs: RATE_LIMIT_WINDOW * 60 * 1000,
-  max: RATE_LIMIT_MAX,
-  message: "Too many requests, please try again later",
-});
-
 // Apply rate limiter to all routes
-router.use(limiter);
+router.use(apiLimiter);
 
 // Mount route modules
 router.use("/health", healthRoutes);

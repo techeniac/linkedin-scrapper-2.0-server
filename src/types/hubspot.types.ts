@@ -63,3 +63,44 @@ export interface SyncLeadResponse {
   companyId?: string | null;
   companySyncError?: string | null;
 }
+
+export interface CreateNoteRequest {
+  noteTitle?: string;
+  notes: string;
+  contactId?: string;
+  ownerId?: string;
+}
+
+// Task interfaces
+export interface CreateTaskRequest {
+  taskName: string;
+  dueDate?: string;
+  time?: string;
+  priority: "Low" | "Medium" | "High";
+  status: string;
+  assignedTo?: string;
+  comment?: string;
+  contactId?: string;
+}
+
+export interface UpdateTaskRequest {
+  taskName: string;
+  dueDate?: string;
+  time?: string;
+  priority: "Low" | "Medium" | "High";
+  status: string;
+  assignedTo?: string;
+  comment?: string;
+}
+
+export interface TaskResponse {
+  id: string;
+  taskName: string;
+  dueDate?: string | null;
+  time?: string | null;
+  priority: string;
+  status: string;
+  assignedTo?: string | null;
+  comment?: string | null;
+  timestamp: string;
+}

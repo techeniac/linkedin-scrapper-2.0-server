@@ -1,3 +1,4 @@
+import { userAwareLimiter } from "../middlewares/rateLimiter";
 import { Router } from "express";
 import {
   register,
@@ -14,6 +15,7 @@ const router = Router();
 // POST /api/auth/register - Register new user with validation
 router.post(
   "/register",
+  userAwareLimiter,
   [
     body("email").isEmail().withMessage("Valid email is required"),
     body("password")
@@ -28,6 +30,7 @@ router.post(
 // POST /api/auth/login - Authenticate user and return JWT
 router.post(
   "/login",
+  userAwareLimiter,
   [
     body("email").isEmail().withMessage("Valid email is required"),
     body("password").notEmpty().withMessage("Password is required"),

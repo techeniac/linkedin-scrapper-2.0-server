@@ -1,8 +1,12 @@
 import axios from "axios";
+import sanitizeHtml from "sanitize-html";
 import {
   ContactData,
   CompanyData,
   SyncLeadResponse,
+  CreateTaskRequest,
+  UpdateTaskRequest,
+  TaskResponse,
 } from "../types/hubspot.types";
 import logger from "../utils/logger";
 
@@ -16,6 +20,18 @@ export class HubSpotSyncService {
       "Content-Type": "application/json",
       Authorization: `Bearer ${accessToken}`,
     };
+  }
+
+  // Strip all HTML tags and normalize whitespace for note fields
+  private sanitizeNoteText(text: string | null | undefined): string | null {
+    if (!text) return null;
+
+    const cleaned = sanitizeHtml(text, {
+      allowedTags: [],
+      allowedAttributes: {},
+    });
+
+    return cleaned.replace(/\s+/g, " ").trim() || null;
   }
 
   // Sync complete lead (contact + company + associations + notes)
@@ -97,7 +113,7 @@ export class HubSpotSyncService {
       lastname: contact.name.split(" ").slice(1).join(" ") || "",
       jobtitle: contact.selectedRole || contact.headline || "",
       company: contact.selectedCompany || "",
-      lifecyclestage: "lead",
+      lifecyclestage: "",
       hs_linkedin_url: contact.profileUrl,
     };
 
@@ -269,6 +285,9 @@ export class HubSpotSyncService {
     phone?: string;
     lifecycleStage?: string;
     lastmodifieddate?: string;
+    leadStatus?: string;
+    leadSource?: string;
+    connectedOnSource?: string;
   } | null> {
     if (!username || !username.trim()) return null;
     const searchPattern = `/in/${username.trim()}`;
@@ -299,6 +318,9 @@ export class HubSpotSyncService {
             "lifecyclestage",
             "hs_object_id",
             "hs_linkedin_url",
+            "hs_lead_status",
+            "approach",
+            "contact_source",
           ],
         },
         { headers: this.headers },
@@ -331,6 +353,9 @@ export class HubSpotSyncService {
         owner: ownerName || undefined,
         lifecycleStage: matched.properties?.lifecyclestage,
         lastmodifieddate: matched.properties?.lastmodifieddate,
+        leadStatus: matched.properties?.hs_lead_status,
+        leadSource: matched.properties?.approach,
+        connectedOnSource: matched.properties?.contact_source,
       };
     } catch (err: any) {
       if (err.response?.status === 404 || err.response?.status === 400)
@@ -392,7 +417,7 @@ export class HubSpotSyncService {
     return null;
   }
 
-  // Normalize website URL to domain format
+  // Normalize website URL to domain format (removes protocol and www)
   private normalizeWebsite(website?: string | null): string | null {
     if (!website) return null;
     try {
@@ -409,8 +434,10 @@ export class HubSpotSyncService {
   async getPropertyOptions(): Promise<{
     owners: Array<{ label: string; value: string }>;
     lifecycleStages: Array<{ label: string; value: string }>;
+    leadStatuses: Array<{ label: string; value: string }>;
+    leadSources: Array<{ label: string; value: string }>;
+    connectedOnSources: Array<{ label: string; value: string }>;
   }> {
-    // Fetch owners
     const ownersResp = await axios.get(`${this.baseUrl}/crm/v3/owners`, {
       headers: this.headers,
     });
@@ -422,7 +449,6 @@ export class HubSpotSyncService {
       value: String(o.id),
     }));
 
-    // Fetch lifecycle stages
     const lifecycleResp = await axios.get(
       `${this.baseUrl}/crm/v3/properties/contact/lifecyclestage`,
       { headers: this.headers },
@@ -434,7 +460,46 @@ export class HubSpotSyncService {
       }),
     );
 
-    return { owners, lifecycleStages };
+    const leadStatusResp = await axios.get(
+      `${this.baseUrl}/crm/v3/properties/contact/hs_lead_status`,
+      { headers: this.headers },
+    );
+    const leadStatuses = (leadStatusResp.data?.options || []).map(
+      (opt: any) => ({
+        label: opt.label,
+        value: opt.value,
+      }),
+    );
+
+    const leadSourceResp = await axios.get(
+      `${this.baseUrl}/crm/v3/properties/contact/approach`,
+      { headers: this.headers },
+    );
+    const leadSources = (leadSourceResp.data?.options || []).map(
+      (opt: any) => ({
+        label: opt.label,
+        value: opt.value,
+      }),
+    );
+
+    const connectedOnResp = await axios.get(
+      `${this.baseUrl}/crm/v3/properties/contact/contact_source`,
+      { headers: this.headers },
+    );
+    const connectedOnSources = (connectedOnResp.data?.options || []).map(
+      (opt: any) => ({
+        label: opt.label,
+        value: opt.value,
+      }),
+    );
+
+    return {
+      owners,
+      lifecycleStages,
+      leadStatuses,
+      leadSources,
+      connectedOnSources,
+    };
   }
 
   // Update contact by LinkedIn username
@@ -446,10 +511,12 @@ export class HubSpotSyncService {
       phone?: string;
       owner?: string;
       lifecycle?: string;
+      leadStatus?: string;
+      leadSource?: string;
+      connectedOnSource?: string;
       company?: string;
     },
   ): Promise<void> {
-    // Find contact first
     const contact = await this.findContactByProfileUrl(username);
     if (!contact) {
       throw new Error("Contact not found in HubSpot");
@@ -466,6 +533,10 @@ export class HubSpotSyncService {
     if (updates.phone) properties.phone = updates.phone;
     if (updates.owner) properties.hubspot_owner_id = updates.owner;
     if (updates.lifecycle) properties.lifecyclestage = updates.lifecycle;
+    if (updates.leadStatus) properties.hs_lead_status = updates.leadStatus;
+    if (updates.leadSource) properties.approach = updates.leadSource;
+    if (updates.connectedOnSource)
+      properties.contact_source = updates.connectedOnSource;
     if (updates.company) properties.company = updates.company;
 
     await axios.patch(
@@ -473,5 +544,409 @@ export class HubSpotSyncService {
       { properties },
       { headers: this.headers },
     );
+  }
+
+  // Create a note associated with a HubSpot contact
+  async createNote(data: {
+    noteTitle?: string;
+    notes: string;
+    contactId?: string;
+    ownerId?: string;
+  }) {
+    let noteBody = data.notes;
+
+    if (data.noteTitle) {
+      noteBody = `<b>${data.noteTitle}</b><br/><br/>` + data.notes;
+    }
+
+    const properties: any = {
+      hs_note_body: noteBody,
+      hs_timestamp: new Date().toISOString(),
+      hubspot_owner_id: data.ownerId || undefined,
+    };
+
+    const payload = {
+      properties,
+      associations: [
+        {
+          to: { id: data.contactId },
+          types: [
+            { associationCategory: "HUBSPOT_DEFINED", associationTypeId: 202 },
+          ],
+        },
+      ],
+    };
+
+    const response = await axios.post(
+      `${this.baseUrl}/crm/v3/objects/notes`,
+      payload,
+      { headers: this.headers },
+    );
+
+    return response.data;
+  }
+
+  // Parse note body HTML to extract structured fields
+  private parseNoteBody(body: string) {
+    const titleMatch = body.match(/<b>(.*?)<\/b><br\/><br\/>/);
+
+    let noteTitle = titleMatch?.[1] || null;
+    let notes = titleMatch
+      ? body.replace(/<b>.*?<\/b><br\/><br\/>/, "").trim()
+      : body;
+
+    return { noteTitle, notes };
+  }
+
+  // Get all notes associated with a contact
+  async getNotesByContact(contactId: string) {
+    const response = await axios.get(
+      `${this.baseUrl}/crm/v4/objects/contacts/${contactId}/associations/notes`,
+      {
+        headers: this.headers,
+      },
+    );
+
+    const noteIds = response.data.results?.map((r: any) => r.toObjectId) || [];
+
+    if (noteIds.length === 0) return [];
+
+    const notesResponse = await axios.post(
+      `${this.baseUrl}/crm/v3/objects/notes/batch/read`,
+      {
+        properties: ["hs_note_body", "hs_timestamp", "hubspot_owner_id"],
+        inputs: noteIds.map((id: string) => ({ id })),
+      },
+      { headers: this.headers },
+    );
+
+    return (notesResponse.data.results || []).map((note: any) => {
+      const parsed = this.parseNoteBody(note.properties?.hs_note_body || "");
+
+      const sanitizedTitle = this.sanitizeNoteText(parsed.noteTitle);
+      const sanitizedNotes = this.sanitizeNoteText(parsed.notes);
+
+      return {
+        id: note.id,
+        noteTitle: sanitizedTitle,
+        notes: sanitizedNotes,
+        timestamp: note.properties?.hs_timestamp,
+        createdAt: note.createdAt,
+        updatedAt: note.updatedAt,
+      };
+    });
+  }
+
+  // Update an existing note
+  async updateNote(
+    noteId: string,
+    data: {
+      noteTitle?: string;
+      notes: string;
+    },
+  ) {
+    let noteBody = data.notes;
+
+    if (data.noteTitle) {
+      noteBody = `<b>${data.noteTitle}</b><br/><br/>` + data.notes;
+    }
+
+    const response = await axios.patch(
+      `${this.baseUrl}/crm/v3/objects/notes/${noteId}`,
+      {
+        properties: {
+          hs_note_body: noteBody,
+        },
+      },
+      { headers: this.headers },
+    );
+
+    return response.data;
+  }
+
+  // Delete a note
+  async deleteNote(noteId: string) {
+    await axios.delete(`${this.baseUrl}/crm/v3/objects/notes/${noteId}`, {
+      headers: this.headers,
+    });
+  }
+
+  // Add these methods to the HubSpotSyncService class
+
+  // Get all tasks associated with a contact
+  async getTasksByContact(contactId: string): Promise<TaskResponse[]> {
+    const response = await axios.get(
+      `${this.baseUrl}/crm/v4/objects/contacts/${contactId}/associations/tasks`,
+      { headers: this.headers },
+    );
+
+    const taskIds = response.data.results?.map((r: any) => r.toObjectId) || [];
+    if (taskIds.length === 0) return [];
+
+    const tasksResponse = await axios.post(
+      `${this.baseUrl}/crm/v3/objects/tasks/batch/read`,
+      {
+        properties: [
+          "hs_task_subject",
+          "hs_task_body",
+          "hs_task_priority",
+          "hs_task_status",
+          "hubspot_owner_id",
+          "hs_timestamp",
+        ],
+        inputs: taskIds.map((id: string) => ({ id })),
+      },
+      { headers: this.headers },
+    );
+
+    return Promise.all(
+      (tasksResponse.data.results || []).map(async (task: any) => {
+        const props = task.properties;
+        const { dueDate, time } = this.parseHubSpotDateTime(props.hs_timestamp);
+
+        let assignedTo: string | null = null;
+        if (props.hubspot_owner_id) {
+          assignedTo = await this.getOwnerById(props.hubspot_owner_id);
+        }
+
+        return {
+          id: task.id,
+          taskName: props.hs_task_subject || "",
+          dueDate: dueDate,
+          time: time,
+          priority: this.mapPriorityFromHubSpot(props.hs_task_priority),
+          status: props.hs_task_status || "NOT_STARTED",
+          assignedTo: assignedTo || null,
+          comment: props.hs_task_body || null,
+          timestamp: task.createdAt,
+        };
+      }),
+    );
+  }
+
+  // Create a task associated with a HubSpot contact
+  async createTask(
+    data: CreateTaskRequest,
+    ownerId?: string,
+  ): Promise<TaskResponse> {
+    const properties: any = {
+      hs_task_subject: data.taskName,
+      hs_task_priority: this.mapPriorityToHubSpot(data.priority),
+      hs_task_status: this.mapStatusToHubSpot(data.status),
+    };
+
+    if (data.dueDate) {
+      const timeStr = data.time || "00:00";
+      properties.hs_timestamp = this.convertLocalTimeToUTC(
+        data.dueDate,
+        timeStr,
+      );
+    }
+    if (data.comment) properties.hs_task_body = data.comment;
+    if (ownerId) properties.hubspot_owner_id = ownerId;
+
+    const payload: any = { properties };
+
+    if (data.contactId) {
+      payload.associations = [
+        {
+          to: { id: data.contactId },
+          types: [
+            { associationCategory: "HUBSPOT_DEFINED", associationTypeId: 204 },
+          ],
+        },
+      ];
+    }
+
+    try {
+      const response = await axios.post(
+        `${this.baseUrl}/crm/v3/objects/tasks`,
+        payload,
+        { headers: this.headers },
+      );
+
+      const task = response.data;
+      const { dueDate, time } = this.parseHubSpotDateTime(
+        task.properties.hs_timestamp,
+      );
+
+      let assignedTo: string | null = null;
+      if (task.properties.hubspot_owner_id) {
+        assignedTo = await this.getOwnerById(task.properties.hubspot_owner_id);
+      }
+
+      return {
+        id: task.id,
+        taskName: task.properties.hs_task_subject,
+        dueDate: dueDate,
+        time: time,
+        priority: this.mapPriorityFromHubSpot(task.properties.hs_task_priority),
+        status: task.properties.hs_task_status,
+        assignedTo: assignedTo || null,
+        comment: task.properties.hs_task_body || null,
+        timestamp: task.createdAt,
+      };
+    } catch (error: any) {
+      logger.error(`[HubSpot] Task creation failed: ${error.message}`);
+      logger.error(
+        `[HubSpot] Response: ${JSON.stringify(error.response?.data)}`,
+      );
+      throw new Error(
+        `Task creation failed: ${error.response?.data?.message || error.message}`,
+      );
+    }
+  }
+
+  // Update an existing task
+  async updateTask(
+    taskId: string,
+    data: UpdateTaskRequest,
+  ): Promise<TaskResponse> {
+    const properties: any = {
+      hs_task_subject: data.taskName,
+      hs_task_priority: this.mapPriorityToHubSpot(data.priority),
+      hs_task_status: this.mapStatusToHubSpot(data.status),
+      hubspot_owner_id: data.assignedTo,
+    };
+
+    if (data.dueDate) {
+      const timeStr = data.time || "00:00";
+      properties.hs_timestamp = this.convertLocalTimeToUTC(
+        data.dueDate,
+        timeStr,
+      );
+    }
+    if (data.comment !== undefined) properties.hs_task_body = data.comment;
+
+    await axios.patch(
+      `${this.baseUrl}/crm/v3/objects/tasks/${taskId}`,
+      { properties },
+      { headers: this.headers },
+    );
+
+    const response = await axios.get(
+      `${this.baseUrl}/crm/v3/objects/tasks/${taskId}`,
+      {
+        params: {
+          properties:
+            "hs_task_subject,hs_task_body,hs_task_priority,hs_task_status,hubspot_owner_id,hs_timestamp",
+        },
+        headers: this.headers,
+      },
+    );
+
+    const task = response.data;
+    const { dueDate, time } = this.parseHubSpotDateTime(
+      task.properties.hs_timestamp,
+    );
+
+    let assignedTo: string | null = null;
+    if (task.properties.hubspot_owner_id) {
+      assignedTo = await this.getOwnerById(task.properties.hubspot_owner_id);
+    }
+
+    return {
+      id: task.id,
+      taskName: task.properties.hs_task_subject,
+      dueDate: dueDate,
+      time: time,
+      priority: this.mapPriorityFromHubSpot(task.properties.hs_task_priority),
+      status: task.properties.hs_task_status,
+      assignedTo: assignedTo || null,
+      comment: task.properties.hs_task_body || null,
+      timestamp: task.updatedAt,
+    };
+  }
+
+  // Delete a task
+  async deleteTask(taskId: string): Promise<void> {
+    await axios.delete(`${this.baseUrl}/crm/v3/objects/tasks/${taskId}`, {
+      headers: this.headers,
+    });
+  }
+
+  // Helper: Map priority to HubSpot format
+  private mapPriorityToHubSpot(priority: string): string {
+    const map: Record<string, string> = {
+      Low: "LOW",
+      Medium: "MEDIUM",
+      High: "HIGH",
+    };
+    return map[priority] || "MEDIUM";
+  }
+
+  // Helper: Map priority from HubSpot format
+  private mapPriorityFromHubSpot(priority: string): string {
+    const map: Record<string, string> = {
+      LOW: "Low",
+      MEDIUM: "Medium",
+      HIGH: "High",
+    };
+    return map[priority] || "Medium";
+  }
+
+  // Helper: Map status to HubSpot format
+  private mapStatusToHubSpot(status: string): string {
+    const statusMap: Record<string, string> = {
+      "To do": "NOT_STARTED",
+      "In progress": "IN_PROGRESS",
+      COMPLETED: "COMPLETED",
+      Waiting: "WAITING",
+      Deferred: "DEFERRED",
+    };
+    return statusMap[status] || "NOT_STARTED";
+  }
+
+  private convertLocalTimeToUTC(date: string, time: string): string {
+    // Combine date and time in local timezone
+    const localDateTime = `${date}T${time}:00`;
+    const localDate = new Date(localDateTime);
+
+    // Convert to UTC ISO string
+    return localDate.toISOString();
+  }
+
+  // Helper: Combine date and time into ISO timestamp
+  private combineDateTimeToTimestamp(
+    date?: string,
+    time?: string,
+  ): string | null {
+    if (!date) return null;
+
+    const timeStr = time || "00:00";
+    const dateTimeStr = `${date}T${timeStr}:00.000Z`;
+
+    try {
+      return new Date(dateTimeStr).getTime().toString();
+    } catch {
+      return null;
+    }
+  }
+
+  // Helper: Parse HubSpot timestamp to date and time
+  private parseHubSpotDateTime(timestamp?: string): {
+    dueDate: string | null;
+    time: string | null;
+  } {
+    if (!timestamp) return { dueDate: null, time: null };
+
+    try {
+      // Parse UTC timestamp and convert to local time
+      const date = new Date(timestamp);
+
+      // Get local date and time
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, "0");
+      const day = String(date.getDate()).padStart(2, "0");
+      const hours = String(date.getHours()).padStart(2, "0");
+      const minutes = String(date.getMinutes()).padStart(2, "0");
+
+      const dueDate = `${year}-${month}-${day}`;
+      const time = `${hours}:${minutes}`;
+
+      return { dueDate, time };
+    } catch {
+      return { dueDate: null, time: null };
+    }
   }
 }

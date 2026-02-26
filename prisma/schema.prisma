@@ -7,6 +7,7 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// User model with HubSpot OAuth integration
 model User {
   id                    String    @id @default(uuid())
   email                 String    @unique
@@ -22,6 +23,7 @@ model User {
   @@map("users")
 }
 
+// OAuth state for secure authorization flow (CSRF protection)
 model OAuthState {
   id        String   @id @default(uuid())
   state     String   @unique

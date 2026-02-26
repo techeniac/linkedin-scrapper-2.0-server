@@ -9,9 +9,10 @@ import { ALLOWED_ORIGINS, NODE_ENV } from "./config/env";
 
 const app: Application = express();
 
+// Security middleware - sets various HTTP headers
 app.use(helmet());
 
-// CORS configuration
+// CORS configuration with origin validation
 app.use(
   cors({
     origin: (origin, callback) => {
@@ -34,16 +35,23 @@ app.use(
   }),
 );
 
+// Body parsing middleware with size limits
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+
+// HTTP request logging
 app.use(morgan("combined"));
 app.use(requestLogger);
 
+// Root endpoint
 app.get("/", (req, res) => {
   res.json({ message: "Hello World" });
 });
 
+// Mount API routes
 app.use("/api", routes);
+
+// Global error handler (must be last)
 app.use(errorHandler);
 
 export default app;

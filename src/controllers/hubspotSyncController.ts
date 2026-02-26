@@ -1,11 +1,10 @@
 import { Response, NextFunction } from "express";
-import { HubSpotSyncService } from "../services/hubspotSyncService";
-import { HubSpotOAuthService } from "../services/hubspotOAuthService";
+import { HubSpotContextService } from "../services/hubspotContextService";
 import { successResponse, errorResponse } from "../utils/apiResponse";
 import { AuthRequest } from "../types";
-import { SyncLeadRequest } from "../types/hubspot.types";
-import prisma from "../config/prisma";
+import { SyncLeadRequest, CreateNoteRequest } from "../types/hubspot.types";
 
+// Sync LinkedIn lead (contact + company) to HubSpot
 export const syncLead = async (
   req: AuthRequest,
   res: Response,
@@ -14,27 +13,18 @@ export const syncLead = async (
   try {
     const { contact, company }: SyncLeadRequest = req.body;
 
-    const userId = req.user!.id;
-    const user = await prisma.user.findUnique({ where: { id: userId } });
+    const { userId, ownerId, syncService } =
+      await HubSpotContextService.getContext(req.user!.id);
 
-    // Check HubSpot connection via access token
-    if (!user?.hubspotAccessToken || !user?.hubspotRefreshToken) {
-      errorResponse(res, "HubSpot connection required", 400);
-      return;
-    }
-
-    const accessToken = await HubSpotOAuthService.getValidAccessToken(userId);
-    const hubspotService = new HubSpotSyncService(accessToken);
-
-    const result = await hubspotService.syncFullLead(
+    const result = await syncService.syncFullLead(
       contact,
       company || null,
-      user.hubspotOwnerId || undefined,
+      ownerId,
     );
 
     successResponse(
       res,
-      { ...result, hubspotOwnerId: user.hubspotOwnerId },
+      { ...result, hubspotOwnerId: ownerId },
       "Lead synced successfully",
     );
   } catch (error: any) {
@@ -42,6 +32,7 @@ export const syncLead = async (
   }
 };
 
+// Check if LinkedIn profile exists in HubSpot
 export const checkProfile = async (
   req: AuthRequest,
   res: Response,
@@ -50,19 +41,10 @@ export const checkProfile = async (
   try {
     const { username } = req.query;
 
-    const userId = req.user!.id;
-    const user = await prisma.user.findUnique({ where: { id: userId } });
+    const { userId, ownerId, syncService } =
+      await HubSpotContextService.getContext(req.user!.id);
 
-    // Check HubSpot connection via access token
-    if (!user?.hubspotAccessToken || !user?.hubspotRefreshToken) {
-      successResponse(res, { exists: false, synced: false });
-      return;
-    }
-
-    const accessToken = await HubSpotOAuthService.getValidAccessToken(userId);
-    const hubspotService = new HubSpotSyncService(accessToken);
-
-    const contact = await hubspotService.findContactByProfileUrl(
+    const contact = await syncService.findContactByProfileUrl(
       username as string,
     );
 
@@ -73,6 +55,7 @@ export const checkProfile = async (
       successResponse(res, {
         exists: true,
         synced: true,
+        contactId: contact.id,
         name,
         email: contact.email,
         phone: contact.phone,
@@ -80,6 +63,9 @@ export const checkProfile = async (
         owner: contact.owner,
         lifecycleStage: contact.lifecycleStage,
         syncedAt: contact.lastmodifieddate,
+        leadStatus: contact.leadStatus,
+        leadSource: contact.leadSource,
+        connectedOnSource: contact.connectedOnSource,
       });
       return;
     }
@@ -90,23 +76,24 @@ export const checkProfile = async (
   }
 };
 
+// Get HubSpot property options (owners and lifecycle stages)
 export const getPropertyOptions = async (
   req: AuthRequest,
   res: Response,
   next: NextFunction,
 ): Promise<void> => {
   try {
-    const userId = req.user!.id;
-    const accessToken = await HubSpotOAuthService.getValidAccessToken(userId);
-    const hubspotService = new HubSpotSyncService(accessToken);
+    const { userId, ownerId, syncService } =
+      await HubSpotContextService.getContext(req.user!.id);
 
-    const options = await hubspotService.getPropertyOptions();
+    const options = await syncService.getPropertyOptions();
     successResponse(res, options, "Property options fetched successfully");
   } catch (error: any) {
     next(error);
   }
 };
 
+// Update HubSpot contact by LinkedIn username
 export const updateContact = async (
   req: AuthRequest,
   res: Response,
@@ -116,7 +103,18 @@ export const updateContact = async (
     const { username } = req.query;
 
     // Whitelist allowed properties
-    const allowedFields = ["email", "phone", "owner", "lifecycle", "company"];
+    const allowedFields = [
+      "name",
+      "email",
+      "phone",
+      "owner",
+      "lifecycle",
+      "company",
+      "leadStatus",
+      "leadSource",
+      "connectedOnSource",
+    ];
+
     const updates: Record<string, string> = {};
 
     for (const field of allowedFields) {
@@ -130,12 +128,100 @@ export const updateContact = async (
       return;
     }
 
-    const userId = req.user!.id;
-    const accessToken = await HubSpotOAuthService.getValidAccessToken(userId);
-    const hubspotService = new HubSpotSyncService(accessToken);
+    const { userId, ownerId, syncService } =
+      await HubSpotContextService.getContext(req.user!.id);
 
-    await hubspotService.updateContactByUsername(username as string, updates);
+    await syncService.updateContactByUsername(username as string, updates);
     successResponse(res, null, "Contact updated successfully");
+  } catch (error: any) {
+    next(error);
+  }
+};
+
+// Create a note associated with a HubSpot contact
+export const createNote = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const { noteTitle, notes, contactId }: CreateNoteRequest = req.body;
+
+    const { userId, ownerId, syncService } =
+      await HubSpotContextService.getContext(req.user!.id);
+
+    const result = await syncService.createNote({
+      noteTitle,
+      notes,
+      contactId,
+      ownerId: ownerId,
+    });
+
+    successResponse(res, result.id, "Note created successfully");
+  } catch (error: any) {
+    next(error);
+  }
+};
+
+// Get all notes associated with a HubSpot contact
+export const getNotes = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const { contactId } = req.query;
+
+    const { userId, ownerId, syncService } =
+      await HubSpotContextService.getContext(req.user!.id);
+
+    const notes = await syncService.getNotesByContact(contactId as string);
+
+    successResponse(res, notes, "Notes fetched successfully");
+  } catch (error: any) {
+    next(error);
+  }
+};
+
+// Update an existing HubSpot note
+export const updateNote = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const { noteId } = req.params;
+    const { noteTitle, notes } = req.body;
+
+    const { userId, ownerId, syncService } =
+      await HubSpotContextService.getContext(req.user!.id);
+
+    await syncService.updateNote(noteId, {
+      noteTitle,
+      notes,
+    });
+
+    successResponse(res, null, "Note updated successfully");
+  } catch (error: any) {
+    next(error);
+  }
+};
+
+// Delete a HubSpot note
+export const deleteNote = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const { noteId } = req.params;
+
+    const { userId, ownerId, syncService } =
+      await HubSpotContextService.getContext(req.user!.id);
+
+    await syncService.deleteNote(noteId);
+
+    successResponse(res, null, "Note deleted successfully");
   } catch (error: any) {
     next(error);
   }
