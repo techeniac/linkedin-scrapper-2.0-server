@@ -11,6 +11,6 @@ export const apiLimiter = rateLimit({
 export const userAwareLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 200,
-  keyGenerator: (req: AuthRequest) => req.user?.id || req.ip,
+  keyGenerator: (req: AuthRequest) => req.user?.id || req.ip || "unknown",
   message: "Too many requests for this user, please slow down",
 });
