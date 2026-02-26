@@ -549,23 +549,14 @@ export class HubSpotSyncService {
   // Create a note associated with a HubSpot contact
   async createNote(data: {
     noteTitle?: string;
-    dealValue?: string;
-    nextStep?: string;
     notes: string;
     contactId?: string;
     ownerId?: string;
   }) {
     let noteBody = data.notes;
 
-    // Format note with optional structured fields
-    if (data.noteTitle || data.dealValue || data.nextStep) {
-      noteBody = "";
-      if (data.noteTitle) noteBody += `<b>${data.noteTitle}</b><br/><br/>`;
-      if (data.dealValue)
-        noteBody += `<b>Deal Value:</b> ${data.dealValue}<br/>`;
-      if (data.nextStep)
-        noteBody += `<b>Next Step:</b> ${data.nextStep}<br/><br/>`;
-      noteBody += data.notes;
+    if (data.noteTitle) {
+      noteBody = `<b>${data.noteTitle}</b><br/><br/>` + data.notes;
     }
 
     const properties: any = {
@@ -586,42 +577,25 @@ export class HubSpotSyncService {
       ],
     };
 
-    try {
-      const response = await axios.post(
-        `${this.baseUrl}/crm/v3/objects/notes`,
-        payload,
-        { headers: this.headers },
-      );
+    const response = await axios.post(
+      `${this.baseUrl}/crm/v3/objects/notes`,
+      payload,
+      { headers: this.headers },
+    );
 
-      logger.warn("Note creation response: ", response.data);
-
-      return response.data;
-    } catch (error: any) {
-      logger.error("Error creating HubSpot note:", error);
-      throw error;
-    }
+    return response.data;
   }
 
   // Parse note body HTML to extract structured fields
   private parseNoteBody(body: string) {
-    const titleMatch = body.match(/<b>(.*?)<\/b>/);
-    const dealMatch = body.match(/<b>Deal Value:<\/b>\s*([^<]+)/);
-    const nextStepMatch = body.match(/<b>Next Step:<\/b>\s*([^<]+)/);
+    const titleMatch = body.match(/<b>(.*?)<\/b><br\/><br\/>/);
 
     let noteTitle = titleMatch?.[1] || null;
-    let dealValue = dealMatch?.[1]?.trim() || null;
-    let nextStep = nextStepMatch?.[1]?.trim() || null;
+    let notes = titleMatch
+      ? body.replace(/<b>.*?<\/b><br\/><br\/>/, "").trim()
+      : body;
 
-    let notes = body;
-    if (titleMatch || dealMatch || nextStepMatch) {
-      notes = body
-        .replace(/<b>.*?<\/b><br><br>/, "")
-        .replace(/<b>Deal Value:<\/b>[^<]*<br>/, "")
-        .replace(/<b>Next Step:<\/b>[^<]*<br><br>/, "")
-        .trim();
-    }
-
-    return { noteTitle, dealValue, nextStep, notes };
+    return { noteTitle, notes };
   }
 
   // Get all notes associated with a contact
@@ -650,16 +624,12 @@ export class HubSpotSyncService {
       const parsed = this.parseNoteBody(note.properties?.hs_note_body || "");
 
       const sanitizedTitle = this.sanitizeNoteText(parsed.noteTitle);
-      const sanitizedDealValue = this.sanitizeNoteText(parsed.dealValue);
-      const sanitizedNextStep = this.sanitizeNoteText(parsed.nextStep);
       const sanitizedNotes = this.sanitizeNoteText(parsed.notes);
 
       return {
         id: note.id,
         noteTitle: sanitizedTitle,
-        dealValue: sanitizedDealValue,
-        nextStep: sanitizedNextStep,
-        notes: sanitizedNotes, // <- this will now be plain text, no HTML tags
+        notes: sanitizedNotes,
         timestamp: note.properties?.hs_timestamp,
         createdAt: note.createdAt,
         updatedAt: note.updatedAt,
@@ -672,25 +642,16 @@ export class HubSpotSyncService {
     noteId: string,
     data: {
       noteTitle?: string;
-      dealValue?: string;
-      nextStep?: string;
       notes: string;
     },
   ) {
     let noteBody = data.notes;
 
-    // Format note with optional structured fields
-    if (data.noteTitle || data.dealValue || data.nextStep) {
-      noteBody = "";
-      if (data.noteTitle) noteBody += `<b>${data.noteTitle}</b><br/><br/>`;
-      if (data.dealValue)
-        noteBody += `<b>Deal Value:</b> ${data.dealValue}<br/>`;
-      if (data.nextStep)
-        noteBody += `<b>Next Step:</b> ${data.nextStep}<br/><br/>`;
-      noteBody += data.notes;
+    if (data.noteTitle) {
+      noteBody = `<b>${data.noteTitle}</b><br/><br/>` + data.notes;
     }
 
-    await axios.patch(
+    const response = await axios.patch(
       `${this.baseUrl}/crm/v3/objects/notes/${noteId}`,
       {
         properties: {
@@ -699,6 +660,8 @@ export class HubSpotSyncService {
       },
       { headers: this.headers },
     );
+
+    return response.data;
   }
 
   // Delete a note

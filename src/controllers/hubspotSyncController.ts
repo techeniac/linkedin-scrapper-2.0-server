@@ -145,21 +145,13 @@ export const createNote = async (
   next: NextFunction,
 ): Promise<void> => {
   try {
-    const {
-      noteTitle,
-      dealValue,
-      nextStep,
-      notes,
-      contactId,
-    }: CreateNoteRequest = req.body;
+    const { noteTitle, notes, contactId }: CreateNoteRequest = req.body;
 
     const { userId, ownerId, syncService } =
       await HubSpotContextService.getContext(req.user!.id);
 
     const result = await syncService.createNote({
       noteTitle,
-      dealValue,
-      nextStep,
       notes,
       contactId,
       ownerId: ownerId,
@@ -199,15 +191,13 @@ export const updateNote = async (
 ): Promise<void> => {
   try {
     const { noteId } = req.params;
-    const { noteTitle, dealValue, nextStep, notes } = req.body;
+    const { noteTitle, notes } = req.body;
 
     const { userId, ownerId, syncService } =
       await HubSpotContextService.getContext(req.user!.id);
 
     await syncService.updateNote(noteId, {
       noteTitle,
-      dealValue,
-      nextStep,
       notes,
     });
 

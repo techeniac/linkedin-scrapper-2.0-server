@@ -66,8 +66,6 @@ export interface SyncLeadResponse {
 
 export interface CreateNoteRequest {
   noteTitle?: string;
-  dealValue?: string;
-  nextStep?: string;
   notes: string;
   contactId?: string;
   ownerId?: string;
