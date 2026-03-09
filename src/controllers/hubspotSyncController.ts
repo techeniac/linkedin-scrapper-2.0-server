@@ -2,7 +2,13 @@ import { Response, NextFunction } from "express";
 import { HubSpotContextService } from "../services/hubspotContextService";
 import { successResponse, errorResponse } from "../utils/apiResponse";
 import { AuthRequest } from "../types";
-import { SyncLeadRequest, CreateNoteRequest } from "../types/hubspot.types";
+import {
+  SyncLeadRequest,
+  CreateNoteRequest,
+  UpsertMessagesRequest,
+  // CheckMessagesResponse,
+} from "../types/hubspot.types";
+import logger from "../utils/logger";
 
 // Sync LinkedIn lead (contact + company) to HubSpot
 export const syncLead = async (
@@ -226,3 +232,88 @@ export const deleteNote = async (
     next(error);
   }
 };
+
+// Update the upsertMessages controller in hubspotSyncController.ts
+export const upsertMessages = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    logger.info(`[Controller] Received upsert messages request`);
+    logger.debug(
+      `[Controller] Request body: ${JSON.stringify(req.body, null, 2)}`,
+    );
+
+    const { conversationKey, messages }: UpsertMessagesRequest = req.body;
+
+    if (!conversationKey || !messages || messages.length === 0) {
+      logger.error(
+        `[Controller] Invalid request: missing conversationKey or messages`,
+      );
+      errorResponse(res, "conversationKey and messages are required", 400);
+      return;
+    }
+
+    logger.info(`[Controller] Processing ${messages.length} messages`);
+
+    const { userId, ownerId, syncService } =
+      await HubSpotContextService.getContext(req.user!.id);
+
+    logger.info(`[Controller] Starting message sync...`);
+    const result = await syncService.upsertLinkedInMessages(
+      conversationKey,
+      messages,
+      ownerId,
+    );
+
+    logger.info(
+      `[Controller] Sync completed. Synced: ${result.synced}, Skipped: ${result.skipped}`,
+    );
+
+    successResponse(
+      res,
+      result,
+      `Messages synced successfully. ${result.synced} created, ${result.skipped} skipped.`,
+    );
+  } catch (error: any) {
+    logger.error(`[Controller] Message sync failed: ${error.message}`);
+    next(error);
+  }
+};
+
+// export const checkMessages = async (
+//   req: AuthRequest,
+//   res: Response,
+//   next: NextFunction,
+// ): Promise<void> => {
+//   try {
+//     logger.info(`[Controller] Check messages request received`);
+
+//     const { contactProfileUrl } = req.query;
+
+//     if (!contactProfileUrl) {
+//       logger.error(`[Controller] Missing contactProfileUrl parameter`);
+//       errorResponse(res, "contactProfileUrl is required", 400);
+//       return;
+//     }
+
+//     logger.info(`[Controller] Checking messages for: ${contactProfileUrl}`);
+
+//     const { userId, ownerId, syncService } =
+//       await HubSpotContextService.getContext(req.user!.id);
+
+//     const result = await syncService.checkMessageSyncStatus(
+//       contactProfileUrl as string,
+//     );
+
+//     logger.info(
+//       `[Controller] Check completed. Contact exists: ${result.contactExists}, Messages: ${result.totalMessages}`,
+//     );
+
+//     successResponse(res, result, "Message sync status retrieved successfully");
+//   } catch (error: any) {
+//     logger.error(`[Controller] Check messages failed: ${error.message}`);
+//     next(error);
+//   }
+// };
