@@ -31,3 +31,13 @@ export const HUBSPOT_SCOPES = process.env.HUBSPOT_SCOPES || "";
 export const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(",")
   : ["http://localhost:5173"];
+
+// SMTP email configuration for transactional emails
+export const SMTP_HOST = process.env.SMTP_HOST || "smtp.gmail.com";
+export const SMTP_PORT = parseInt(process.env.SMTP_PORT || "587");
+export const SMTP_USER = process.env.SMTP_USER || "";
+export const SMTP_PASS = process.env.SMTP_PASS || "";
+export const SMTP_FROM = process.env.SMTP_FROM || process.env.SMTP_USER || "noreply@hublead.io";
+
+// App URL used in password-reset links (set to extension popup URL or hosted page)
+export const APP_URL = process.env.APP_URL || "http://localhost:5173";

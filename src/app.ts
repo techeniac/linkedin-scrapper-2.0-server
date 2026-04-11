@@ -1,7 +1,6 @@
 import express, { Application } from "express";
 import helmet from "helmet";
 import cors from "cors";
-import morgan from "morgan";
 import routes from "./routes";
 import errorHandler from "./middlewares/errorHandler";
 import { requestLogger } from "./middlewares/logger";
@@ -40,7 +39,6 @@ app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
 // HTTP request logging
-app.use(morgan("combined"));
 app.use(requestLogger);
 
 // Root endpoint
