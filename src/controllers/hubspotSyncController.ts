@@ -6,7 +6,6 @@ import {
   SyncLeadRequest,
   CreateNoteRequest,
   UpsertMessagesRequest,
-  // CheckMessagesResponse,
 } from "../types/hubspot.types";
 import logger from "../utils/logger";
 
@@ -281,39 +280,3 @@ export const upsertMessages = async (
     next(error);
   }
 };
-
-// export const checkMessages = async (
-//   req: AuthRequest,
-//   res: Response,
-//   next: NextFunction,
-// ): Promise<void> => {
-//   try {
-//     logger.info(`[Controller] Check messages request received`);
-
-//     const { contactProfileUrl } = req.query;
-
-//     if (!contactProfileUrl) {
-//       logger.error(`[Controller] Missing contactProfileUrl parameter`);
-//       errorResponse(res, "contactProfileUrl is required", 400);
-//       return;
-//     }
-
-//     logger.info(`[Controller] Checking messages for: ${contactProfileUrl}`);
-
-//     const { userId, ownerId, syncService } =
-//       await HubSpotContextService.getContext(req.user!.id);
-
-//     const result = await syncService.checkMessageSyncStatus(
-//       contactProfileUrl as string,
-//     );
-
-//     logger.info(
-//       `[Controller] Check completed. Contact exists: ${result.contactExists}, Messages: ${result.totalMessages}`,
-//     );
-
-//     successResponse(res, result, "Message sync status retrieved successfully");
-//   } catch (error: any) {
-//     logger.error(`[Controller] Check messages failed: ${error.message}`);
-//     next(error);
-//   }
-// };

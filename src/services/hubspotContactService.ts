@@ -1,10 +1,7 @@
 import axios from "axios";
 import { ContactData, CompanyData, SyncLeadResponse } from "../types";
 import logger from "../utils/logger";
-import {
-  extractLinkedInHandle,
-  getOwnerById,
-} from "./hubspotHelpers";
+import { extractLinkedInHandle, getOwnerById } from "./hubspotHelpers";
 import { HubSpotCompanyService } from "./hubspotCompanyService";
 
 export class HubSpotContactService {
@@ -30,7 +27,10 @@ export class HubSpotContactService {
     if (company) {
       try {
         logger.info(`[HubSpot] Upserting company: ${company.name}`);
-        const companyResult = await this.companyService.upsertCompany(company, ownerId);
+        const companyResult = await this.companyService.upsertCompany(
+          company,
+          ownerId,
+        );
         hubspotCompanyId = companyResult.id;
         logger.info(`[HubSpot] Company upserted: ${hubspotCompanyId}`);
       } catch (err: any) {
@@ -47,7 +47,10 @@ export class HubSpotContactService {
     if (hubspotContactId && hubspotCompanyId) {
       try {
         logger.info(`[HubSpot] Creating association...`);
-        await this.associateContactToCompany(hubspotContactId, hubspotCompanyId);
+        await this.associateContactToCompany(
+          hubspotContactId,
+          hubspotCompanyId,
+        );
         logger.info(`[HubSpot] Association created`);
       } catch (assocErr: any) {
         logger.error(`[HubSpot] Association failed: ${assocErr.message}`);
@@ -97,12 +100,6 @@ export class HubSpotContactService {
     if (contact.locationState) properties.state = contact.locationState;
     if (contact.locationCountry) properties.country = contact.locationCountry;
     if (handle) properties.linkedin_id = handle;
-    // if (contact.hubspotLeadStatus)
-    //   properties.hs_lead_status = contact.hubspotLeadStatus;
-    // if (contact.hubspotConnectedOnSource)
-    //   properties.contact_source = contact.hubspotConnectedOnSource;
-    // if (contact.hubspotLeadSource)
-    //   properties.approach = contact.hubspotLeadSource;
     if (ownerId) properties.hubspot_owner_id = ownerId;
 
     const payload = { inputs: [{ properties, idProperty, id: idValue }] };
@@ -302,7 +299,10 @@ export class HubSpotContactService {
           {
             to: { id: contactId },
             types: [
-              { associationCategory: "HUBSPOT_DEFINED", associationTypeId: 202 },
+              {
+                associationCategory: "HUBSPOT_DEFINED",
+                associationTypeId: 202,
+              },
             ],
           },
         ],
@@ -318,14 +318,27 @@ export class HubSpotContactService {
     leadSources: Array<{ label: string; value: string }>;
     connectedOnSources: Array<{ label: string; value: string }>;
   }> {
-    const [ownersResp, lifecycleResp, leadStatusResp, leadSourceResp, connectedOnResp] =
-      await Promise.all([
-        axios.get(`${this.baseUrl}/crm/v3/owners`, { headers: this.headers }),
-        axios.get(`${this.baseUrl}/crm/v3/properties/contact/lifecyclestage`, { headers: this.headers }),
-        axios.get(`${this.baseUrl}/crm/v3/properties/contact/hs_lead_status`, { headers: this.headers }),
-        axios.get(`${this.baseUrl}/crm/v3/properties/contact/approach`, { headers: this.headers }),
-        axios.get(`${this.baseUrl}/crm/v3/properties/contact/contact_source`, { headers: this.headers }),
-      ]);
+    const [
+      ownersResp,
+      lifecycleResp,
+      leadStatusResp,
+      leadSourceResp,
+      connectedOnResp,
+    ] = await Promise.all([
+      axios.get(`${this.baseUrl}/crm/v3/owners`, { headers: this.headers }),
+      axios.get(`${this.baseUrl}/crm/v3/properties/contact/lifecyclestage`, {
+        headers: this.headers,
+      }),
+      axios.get(`${this.baseUrl}/crm/v3/properties/contact/hs_lead_status`, {
+        headers: this.headers,
+      }),
+      axios.get(`${this.baseUrl}/crm/v3/properties/contact/approach`, {
+        headers: this.headers,
+      }),
+      axios.get(`${this.baseUrl}/crm/v3/properties/contact/contact_source`, {
+        headers: this.headers,
+      }),
+    ]);
 
     return {
       owners: (ownersResp.data?.results || []).map((o: any) => ({
@@ -347,10 +360,12 @@ export class HubSpotContactService {
         label: opt.label,
         value: opt.value,
       })),
-      connectedOnSources: (connectedOnResp.data?.options || []).map((opt: any) => ({
-        label: opt.label,
-        value: opt.value,
-      })),
+      connectedOnSources: (connectedOnResp.data?.options || []).map(
+        (opt: any) => ({
+          label: opt.label,
+          value: opt.value,
+        }),
+      ),
     };
   }
 }

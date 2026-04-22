@@ -122,11 +122,6 @@ export interface LinkedInMessage {
   };
 }
 
-// export interface LinkedInConversation {
-//   conversationKey: string;
-//   messages: LinkedInMessage[];
-// }
-
 export interface UpsertMessagesRequest {
   conversationKey: string;
   messages: LinkedInMessage[];
@@ -147,11 +142,3 @@ export interface UpsertMessagesResponse {
   skipped: number;
   messages: MessageSyncResult[];
 }
-
-// export interface CheckMessagesResponse {
-//   contactExists: boolean;
-//   contactId?: string;
-//   hasSyncedMessages: boolean;
-//   latestMessageTimestamp?: string;
-//   totalMessages: number;
-// }

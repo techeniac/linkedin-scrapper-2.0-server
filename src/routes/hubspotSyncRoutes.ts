@@ -2,10 +2,7 @@ import { Router } from "express";
 import { userAwareLimiter } from "../middlewares/rateLimiter";
 import { body, query } from "express-validator";
 import { authenticate } from "../middlewares/auth";
-import {
-  upsertMessages,
-  // checkMessages,
-} from "../controllers/hubspotSyncController";
+import { upsertMessages } from "../controllers/hubspotSyncController";
 import {
   createNote,
   getNotes,
@@ -304,21 +301,5 @@ router.post(
   ],
   upsertMessages,
 );
-
-// GET /api/hubspot/check-messages - Check message sync status
-// router.get(
-//   "/check-messages",
-//   authenticate,
-//   [
-//     query("contactProfileUrl")
-//       .trim()
-//       .notEmpty()
-//       .withMessage("contactProfileUrl is required")
-//       .isURL()
-//       .withMessage("contactProfileUrl must be valid URL"),
-//     validate,
-//   ],
-//   checkMessages,
-// );
 
 export default router;
