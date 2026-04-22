@@ -15,8 +15,9 @@ app.use(helmet());
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow requests with no origin (Postman, mobile apps, curl)
-      if (!origin) return callback(null, true);
+      // Allow requests with no origin (Postman, mobile apps, curl, background service workers)
+      // Also allow Chrome extension origins since the extension ID isn't predictable
+      if (!origin || origin.startsWith("chrome-extension://")) return callback(null, true);
 
       // In development, allow all origins
       if (NODE_ENV === "development") return callback(null, true);
