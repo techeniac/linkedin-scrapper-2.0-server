@@ -28,7 +28,8 @@ export const HUBSPOT_REDIRECT_URI = process.env.HUBSPOT_REDIRECT_URI || "";
 export const HUBSPOT_SCOPES = process.env.HUBSPOT_SCOPES || "";
 
 // CORS configuration - allowed origins for cross-origin requests
+// Note: chrome-extension:// origins are handled separately in app.ts
 export const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(",")
-  : ["http://localhost:5173"];
+  : [];
 
