@@ -65,43 +65,4 @@ export class UserModel {
     return bcrypt.compare(plainPassword, hashedPassword);
   }
 
-  // Find user by email and return full record including hashed password
-  // Used by the forgot-password flow to derive the per-user token secret.
-  static async findByEmailWithPassword(email: string): Promise<any> {
-    return prisma.user.findUnique({
-      where: { email },
-      select: {
-        id: true,
-        email: true,
-        password: true,
-        name: true,
-        createdAt: true,
-        updatedAt: true,
-      },
-    });
-  }
-
-  // Find user by ID and include the password hash (needed for token verification)
-  static async findByIdWithPassword(id: string): Promise<any> {
-    return prisma.user.findUnique({
-      where: { id },
-      select: {
-        id: true,
-        email: true,
-        password: true,
-        name: true,
-        createdAt: true,
-        updatedAt: true,
-      },
-    });
-  }
-
-  // Update a user's password (hashes the plain-text value before storing)
-  static async updatePassword(id: string, plainPassword: string): Promise<void> {
-    const hashedPassword = await bcrypt.hash(plainPassword, 10);
-    await prisma.user.update({
-      where: { id },
-      data: { password: hashedPassword },
-    });
-  }
 }
