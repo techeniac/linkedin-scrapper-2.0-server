@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import { AuthService } from "../services/authService";
-import { successResponse, errorResponse } from "../utils/apiResponse";
+import { successResponse } from "../utils/apiResponse";
 import { LoginRequest, RegisterRequest } from "../types";
 
 // Register a new user

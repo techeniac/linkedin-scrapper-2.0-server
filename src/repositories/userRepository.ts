@@ -1,4 +1,3 @@
-// src/repositories/userRepository.ts
 import prisma from "../config/prisma";
 
 export class UserRepository {
@@ -22,18 +21,6 @@ export class UserRepository {
         hubspotRefreshToken: data.refreshToken,
         hubspotOwnerId: data.ownerId,
         hubspotTokenExpiresAt: data.expiresAt,
-      },
-    });
-  }
-
-  static async clearHubSpotTokens(userId: string) {
-    return prisma.user.update({
-      where: { id: userId },
-      data: {
-        hubspotAccessToken: null,
-        hubspotRefreshToken: null,
-        hubspotOwnerId: null,
-        hubspotTokenExpiresAt: null,
       },
     });
   }

@@ -64,4 +64,5 @@ export class UserModel {
   ): Promise<boolean> {
     return bcrypt.compare(plainPassword, hashedPassword);
   }
+
 }

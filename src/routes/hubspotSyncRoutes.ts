@@ -2,6 +2,7 @@ import { Router } from "express";
 import { userAwareLimiter } from "../middlewares/rateLimiter";
 import { body, query } from "express-validator";
 import { authenticate } from "../middlewares/auth";
+import { upsertMessages } from "../controllers/hubspotSyncController";
 import {
   createNote,
   getNotes,
@@ -246,6 +247,59 @@ router.patch(
     validate,
   ],
   updateContact,
+);
+
+// POST /api/hubspot/upsert-messages - Upsert LinkedIn messages
+router.post(
+  "/upsert-messages",
+  authenticate,
+  userAwareLimiter,
+  [
+    body("conversationKey")
+      .trim()
+      .notEmpty()
+      .withMessage("conversationKey is required"),
+    body("messages")
+      .isArray({ min: 1 })
+      .withMessage("messages array is required and must not be empty"),
+    body("messages.*.text")
+      .trim()
+      .notEmpty()
+      .withMessage("message text is required"),
+    body("messages.*.sentAt")
+      .trim()
+      .notEmpty()
+      .isISO8601()
+      .withMessage("message sentAt must be valid ISO date"),
+    body("messages.*.sender.name")
+      .trim()
+      .notEmpty()
+      .withMessage("sender name is required"),
+    body("messages.*.sender.profileUrl")
+      .trim()
+      .notEmpty()
+      .isURL()
+      .withMessage("sender profileUrl must be valid URL"),
+    body("messages.*.sender.distance")
+      .trim()
+      .notEmpty()
+      .withMessage("sender distance is required"),
+    body("messages.*.receiver.name")
+      .trim()
+      .notEmpty()
+      .withMessage("receiver name is required"),
+    body("messages.*.receiver.profileUrl")
+      .trim()
+      .notEmpty()
+      .isURL()
+      .withMessage("receiver profileUrl must be valid URL"),
+    body("messages.*.receiver.distance")
+      .trim()
+      .notEmpty()
+      .withMessage("receiver distance is required"),
+    validate,
+  ],
+  upsertMessages,
 );
 
 export default router;

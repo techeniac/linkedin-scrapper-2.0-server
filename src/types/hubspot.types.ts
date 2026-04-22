@@ -104,3 +104,41 @@ export interface TaskResponse {
   comment?: string | null;
   timestamp: string;
 }
+
+// Add these interfaces to your existing hubspot.types.ts file
+
+export interface LinkedInMessage {
+  text: string;
+  sentAt: string;
+  sender: {
+    name: string;
+    profileUrl: string;
+    distance: "SELF" | string; // "SELF" for current user, anything else for other person
+  };
+  receiver: {
+    name: string;
+    profileUrl: string;
+    distance: "SELF" | string;
+  };
+}
+
+export interface UpsertMessagesRequest {
+  conversationKey: string;
+  messages: LinkedInMessage[];
+}
+
+export interface MessageSyncResult {
+  id: string;
+  status: "created" | "updated" | "skipped";
+  text: string;
+  timestamp: string;
+}
+
+export interface UpsertMessagesResponse {
+  success: boolean;
+  threadId: string;
+  contactId: string;
+  synced: number;
+  skipped: number;
+  messages: MessageSyncResult[];
+}

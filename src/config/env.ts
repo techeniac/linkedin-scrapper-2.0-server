@@ -31,3 +31,4 @@ export const HUBSPOT_SCOPES = process.env.HUBSPOT_SCOPES || "";
 export const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(",")
   : ["http://localhost:5173"];
+
