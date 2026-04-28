@@ -8,6 +8,38 @@ import logger from "../utils/logger";
 import { extractLinkedInHandle, generateThreadId } from "./hubspotHelpers";
 import { HubSpotContactService } from "./hubspotContactService";
 
+function resolveTimeZone(tz?: string): string {
+  if (!tz) return "UTC";
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return tz;
+  } catch {
+    return "UTC";
+  }
+}
+
+// YYYY-MM-DD in the given IANA zone.
+function getLocalDate(iso: string, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date(iso));
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
+function formatLocalTime(iso: string, timeZone: string): string {
+  return new Date(iso).toLocaleTimeString("en-US", {
+    timeZone,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+    timeZoneName: "short",
+  });
+}
+
 export class HubSpotMessageService {
   private contactService: HubSpotContactService;
 
@@ -22,9 +54,11 @@ export class HubSpotMessageService {
     conversationKey: string,
     messages: LinkedInMessage[],
     ownerId?: string,
+    userTimeZone?: string,
   ): Promise<UpsertMessagesResponse> {
+    const tz = resolveTimeZone(userTimeZone);
     logger.info(
-      `[Messages] Starting sync for conversation: ${conversationKey}`,
+      `[Messages] Starting sync for conversation: ${conversationKey} (tz=${tz})`,
     );
 
     try {
@@ -43,12 +77,13 @@ export class HubSpotMessageService {
 
       const existingByDate = new Map<string, string>();
       for (const comm of existingComms) {
-        const commDate = comm.timestamp.split("T")[0];
+        if (!comm.timestamp) continue;
+        const commDate = getLocalDate(comm.timestamp, tz);
         logger.info(`[DEBUG] Existing comm date: ${commDate}, ID: ${comm.id}`);
         existingByDate.set(commDate, comm.id);
       }
 
-      const messagesByDate = this.groupMessagesByDate(messages);
+      const messagesByDate = this.groupMessagesByDate(messages, tz);
       const results: MessageSyncResult[] = [];
       let syncedCount = 0;
 
@@ -62,6 +97,7 @@ export class HubSpotMessageService {
           dayMessages,
           existingByDate.get(date),
           ownerId,
+          tz,
         );
         results.push(result);
         syncedCount++;
@@ -98,13 +134,14 @@ export class HubSpotMessageService {
 
   private groupMessagesByDate(
     messages: LinkedInMessage[],
+    timeZone: string,
   ): Map<string, LinkedInMessage[]> {
     const grouped = new Map<string, LinkedInMessage[]>();
 
     for (const message of messages) {
-      const date = message.sentAt.split("T")[0];
+      const date = getLocalDate(message.sentAt, timeZone);
       logger.info(
-        `[DEBUG] Message sentAt: ${message.sentAt}, extracted date: ${date}`,
+        `[DEBUG] Message sentAt: ${message.sentAt}, local date (${timeZone}): ${date}`,
       );
       if (!grouped.has(date)) grouped.set(date, []);
       grouped.get(date)!.push(message);
@@ -119,14 +156,13 @@ export class HubSpotMessageService {
     return grouped;
   }
 
-  private formatDailyMessageBody(messages: LinkedInMessage[]): string {
+  private formatDailyMessageBody(
+    messages: LinkedInMessage[],
+    timeZone: string,
+  ): string {
     let body = "";
     for (const message of messages) {
-      const time = new Date(message.sentAt).toLocaleTimeString("en-US", {
-        hour: "2-digit",
-        minute: "2-digit",
-        hour12: true,
-      });
+      const time = formatLocalTime(message.sentAt, timeZone);
       body += `<p><strong>${message.sender.name}</strong> - `;
       body += `<strong>Time:</strong> ${time}</p>`;
       body += `<p>${message.text.replace(/\n/g, "<br/>")}</p>`;
@@ -179,14 +215,17 @@ export class HubSpotMessageService {
     date: string,
     messages: LinkedInMessage[],
     existingId: string | undefined,
-    ownerId?: string,
+    ownerId: string | undefined,
+    timeZone: string,
   ): Promise<MessageSyncResult> {
     const firstMessage = messages[0];
-    const dayStartTimestamp = `${date}T00:00:00Z`;
-    const formattedBody = this.formatDailyMessageBody(messages);
+    // Use the first message's actual UTC instant. HubSpot will display it in
+    // its portal timezone; the body itself reads in the LinkedIn-user's zone.
+    const activityTimestamp = new Date(firstMessage.sentAt).toISOString();
+    const formattedBody = this.formatDailyMessageBody(messages, timeZone);
 
     logger.info(
-      `[DEBUG] Processing date: ${date}, dayStartTimestamp: ${dayStartTimestamp}, existingId: ${existingId}`,
+      `[DEBUG] Processing date: ${date}, hs_timestamp: ${activityTimestamp}, existingId: ${existingId}`,
     );
 
     if (existingId) {
@@ -210,7 +249,7 @@ export class HubSpotMessageService {
       hs_communication_channel_type: "LINKEDIN_MESSAGE",
       hs_communication_logged_from: "CRM",
       hs_communication_body: formattedBody,
-      hs_timestamp: dayStartTimestamp,
+      hs_timestamp: activityTimestamp,
     };
     if (ownerId) properties.hubspot_owner_id = ownerId;
 

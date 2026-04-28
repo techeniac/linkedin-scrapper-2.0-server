@@ -244,7 +244,8 @@ export const upsertMessages = async (
       `[Controller] Request body: ${JSON.stringify(req.body, null, 2)}`,
     );
 
-    const { conversationKey, messages }: UpsertMessagesRequest = req.body;
+    const { conversationKey, messages, userTimeZone }: UpsertMessagesRequest =
+      req.body;
 
     if (!conversationKey || !messages || messages.length === 0) {
       logger.error(
@@ -264,6 +265,7 @@ export const upsertMessages = async (
       conversationKey,
       messages,
       ownerId,
+      userTimeZone,
     );
 
     logger.info(

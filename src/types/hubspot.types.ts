@@ -125,6 +125,7 @@ export interface LinkedInMessage {
 export interface UpsertMessagesRequest {
   conversationKey: string;
   messages: LinkedInMessage[];
+  userTimeZone?: string;
 }
 
 export interface MessageSyncResult {
