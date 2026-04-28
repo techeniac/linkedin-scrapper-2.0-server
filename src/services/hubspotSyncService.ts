@@ -88,7 +88,7 @@ export class HubSpotSyncService {
   }
 
   // --- Messages ---
-  upsertLinkedInMessages(conversationKey: string, messages: LinkedInMessage[], ownerId?: string): Promise<UpsertMessagesResponse> {
-    return this.messageService.upsertLinkedInMessages(conversationKey, messages, ownerId);
+  upsertLinkedInMessages(conversationKey: string, messages: LinkedInMessage[], ownerId?: string, userTimeZone?: string): Promise<UpsertMessagesResponse> {
+    return this.messageService.upsertLinkedInMessages(conversationKey, messages, ownerId, userTimeZone);
   }
 }
