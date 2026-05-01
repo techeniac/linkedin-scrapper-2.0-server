@@ -8,6 +8,16 @@ import logger from "../utils/logger";
 import { extractLinkedInHandle, generateThreadId, resolveTimeZone } from "./hubspotHelpers";
 import { HubSpotContactService } from "./hubspotContactService";
 
+function resolveTimeZone(tz?: string): string {
+  if (!tz) return "UTC";
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return tz;
+  } catch {
+    return "UTC";
+  }
+}
+
 // YYYY-MM-DD in the given IANA zone.
 function getLocalDate(iso: string, timeZone: string): string {
   const parts = new Intl.DateTimeFormat("en-CA", {
