@@ -16,7 +16,7 @@ export class HubSpotTaskService {
     private headers: Record<string, string>,
   ) {}
 
-  async getTasksByContact(contactId: string): Promise<TaskResponse[]> {
+  async getTasksByContact(contactId: string, userTimeZone?: string): Promise<TaskResponse[]> {
     const response = await axios.get(
       `${this.baseUrl}/crm/v4/objects/contacts/${contactId}/associations/tasks`,
       { headers: this.headers },
@@ -44,7 +44,7 @@ export class HubSpotTaskService {
     return Promise.all(
       (tasksResponse.data.results || []).map(async (task: any) => {
         const props = task.properties;
-        const { dueDate, time } = parseHubSpotDateTime(props.hs_timestamp);
+        const { dueDate, time } = parseHubSpotDateTime(props.hs_timestamp, userTimeZone);
 
         const assignedTo = props.hubspot_owner_id
           ? await getOwnerById(props.hubspot_owner_id, this.baseUrl, this.headers)
@@ -79,6 +79,7 @@ export class HubSpotTaskService {
       properties.hs_timestamp = convertLocalTimeToUTC(
         data.dueDate,
         data.time || "00:00",
+        data.userTimeZone,
       );
     }
     if (data.comment) properties.hs_task_body = data.comment;
@@ -107,6 +108,7 @@ export class HubSpotTaskService {
       const task = response.data;
       const { dueDate, time } = parseHubSpotDateTime(
         task.properties.hs_timestamp,
+        data.userTimeZone,
       );
 
       const assignedTo = task.properties.hubspot_owner_id
@@ -150,6 +152,7 @@ export class HubSpotTaskService {
       properties.hs_timestamp = convertLocalTimeToUTC(
         data.dueDate,
         data.time || "00:00",
+        data.userTimeZone,
       );
     }
     if (data.comment !== undefined) properties.hs_task_body = data.comment;
@@ -172,7 +175,7 @@ export class HubSpotTaskService {
     );
 
     const task = response.data;
-    const { dueDate, time } = parseHubSpotDateTime(task.properties.hs_timestamp);
+    const { dueDate, time } = parseHubSpotDateTime(task.properties.hs_timestamp, data.userTimeZone);
 
     const assignedTo = task.properties.hubspot_owner_id
       ? await getOwnerById(task.properties.hubspot_owner_id, this.baseUrl, this.headers)

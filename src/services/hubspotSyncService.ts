@@ -71,8 +71,8 @@ export class HubSpotSyncService {
   }
 
   // --- Tasks ---
-  getTasksByContact(contactId: string): Promise<TaskResponse[]> {
-    return this.taskService.getTasksByContact(contactId);
+  getTasksByContact(contactId: string, userTimeZone?: string): Promise<TaskResponse[]> {
+    return this.taskService.getTasksByContact(contactId, userTimeZone);
   }
 
   createTask(data: CreateTaskRequest, ownerId?: string): Promise<TaskResponse> {
