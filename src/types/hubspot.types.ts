@@ -81,6 +81,7 @@ export interface CreateTaskRequest {
   assignedTo?: string;
   comment?: string;
   contactId?: string;
+  userTimeZone?: string;
 }
 
 export interface UpdateTaskRequest {
@@ -91,6 +92,7 @@ export interface UpdateTaskRequest {
   status: string;
   assignedTo?: string;
   comment?: string;
+  userTimeZone?: string;
 }
 
 export interface TaskResponse {

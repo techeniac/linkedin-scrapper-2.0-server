@@ -9,9 +9,9 @@ export const getTasks = async (
   next: NextFunction,
 ): Promise<void> => {
   try {
-    const { contactId } = req.query;
+    const { contactId, userTimeZone } = req.query;
     const { syncService } = await HubSpotContextService.getContext(req.user!.id);
-    const tasks = await syncService.getTasksByContact(contactId as string);
+    const tasks = await syncService.getTasksByContact(contactId as string, userTimeZone as string | undefined);
     successResponse(res, tasks, "Tasks fetched successfully");
   } catch (error) {
     next(error);

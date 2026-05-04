@@ -74,23 +74,47 @@ export function mapStatusToHubSpot(status: string): string {
   return statusMap[status] || "NOT_STARTED";
 }
 
-export function convertLocalTimeToUTC(date: string, time: string): string {
-  return new Date(`${date}T${time}:00`).toISOString();
+export function resolveTimeZone(tz?: string): string {
+  if (!tz) return "UTC";
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return tz;
+  } catch {
+    return "UTC";
+  }
 }
 
-export function parseHubSpotDateTime(timestamp?: string): {
+export function convertLocalTimeToUTC(date: string, time: string, timeZone = "UTC"): string {
+  const tz = resolveTimeZone(timeZone);
+  // Treat the local date+time as UTC initially, then find the true offset in the target timezone
+  const localAsUtc = new Date(`${date}T${time}:00Z`);
+  const tzDisplay = new Intl.DateTimeFormat("sv", {
+    timeZone: tz,
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+  }).format(localAsUtc);
+  // diff = what timezone shows minus what we want — subtract to get real UTC
+  const diff = new Date(tzDisplay + "Z").getTime() - localAsUtc.getTime();
+  return new Date(localAsUtc.getTime() - diff).toISOString();
+}
+
+export function parseHubSpotDateTime(timestamp?: string, timeZone = "UTC"): {
   dueDate: string | null;
   time: string | null;
 } {
   if (!timestamp) return { dueDate: null, time: null };
   try {
-    const date = new Date(timestamp);
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, "0");
-    const day = String(date.getDate()).padStart(2, "0");
-    const hours = String(date.getHours()).padStart(2, "0");
-    const minutes = String(date.getMinutes()).padStart(2, "0");
-    return { dueDate: `${year}-${month}-${day}`, time: `${hours}:${minutes}` };
+    const tz = resolveTimeZone(timeZone);
+    const d = new Date(timestamp);
+    const dueDate = new Intl.DateTimeFormat("en-CA", {
+      timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit",
+    }).format(d);
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false,
+    }).formatToParts(d);
+    const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "00";
+    const hour = get("hour") === "24" ? "00" : get("hour");
+    return { dueDate, time: `${hour}:${get("minute")}` };
   } catch {
     return { dueDate: null, time: null };
   }

@@ -5,7 +5,7 @@ import {
   MessageSyncResult,
 } from "../types";
 import logger from "../utils/logger";
-import { extractLinkedInHandle, generateThreadId } from "./hubspotHelpers";
+import { extractLinkedInHandle, generateThreadId, resolveTimeZone } from "./hubspotHelpers";
 import { HubSpotContactService } from "./hubspotContactService";
 
 function resolveTimeZone(tz?: string): string {
