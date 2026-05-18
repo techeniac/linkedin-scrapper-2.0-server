@@ -17,6 +17,7 @@ import {
   updateTask,
   deleteTask,
 } from "../controllers/taskController";
+import { getAllTasksByOwner } from "../controllers/hubspotSyncController";
 import {
   syncLead,
   checkProfile,
@@ -27,6 +28,9 @@ import {
 } from "../controllers/hubspotSyncController";
 
 const router = Router();
+
+// GET /api/hubspot/tasks/all — all tasks for current owner's contacts
+router.get("/tasks/all", authenticate, getAllTasksByOwner);
 
 // GET /api/hubspot/tasks - Get all tasks for a contact
 router.get(

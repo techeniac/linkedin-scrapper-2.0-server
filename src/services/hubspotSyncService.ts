@@ -1,6 +1,6 @@
 // refactored: was ~1300-line monolith — now a facade that delegates to focused sub-services.
 // Public API and constructor signature are unchanged; all callers continue to work without modification.
-import { ContactData, CompanyData, SyncLeadResponse, CreateTaskRequest, UpdateTaskRequest, TaskResponse, LinkedInMessage, UpsertMessagesResponse, GetContactsByOwnerResponse, PaginatedNotesResult } from "../types";
+import { ContactData, CompanyData, SyncLeadResponse, CreateTaskRequest, UpdateTaskRequest, TaskResponse, TaskItem, LinkedInMessage, UpsertMessagesResponse, GetContactsByOwnerResponse, PaginatedNotesResult } from "../types";
 import { HubSpotContactService } from "./hubspotContactService";
 import { HubSpotCompanyService } from "./hubspotCompanyService";
 import { HubSpotNoteService } from "./hubspotNoteService";
@@ -102,6 +102,14 @@ export class HubSpotSyncService {
     return this.taskService.getTasksByContact(contactId, userTimeZone);
   }
 
+  getTasksByContactPaginated(
+    contactId: string,
+    options?: { limit?: number; after?: string },
+    userTimeZone?: string,
+  ) {
+    return this.taskService.getTasksByContactPaginated(contactId, options, userTimeZone);
+  }
+
   createTask(data: CreateTaskRequest, ownerId?: string): Promise<TaskResponse> {
     return this.taskService.createTask(data, ownerId);
   }
@@ -117,5 +125,12 @@ export class HubSpotSyncService {
   // --- Messages ---
   upsertLinkedInMessages(conversationKey: string, messages: LinkedInMessage[], ownerId?: string, userTimeZone?: string): Promise<UpsertMessagesResponse> {
     return this.messageService.upsertLinkedInMessages(conversationKey, messages, ownerId, userTimeZone);
+  }
+
+  getAllTasksByContacts(
+    contacts: Parameters<HubSpotTaskService["getAllTasksByContacts"]>[0],
+    userTimeZone?: string,
+  ): Promise<TaskItem[]> {
+    return this.taskService.getAllTasksByContacts(contacts, userTimeZone);
   }
 }

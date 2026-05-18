@@ -1,6 +1,6 @@
 import { Response, NextFunction } from "express";
 import { HubSpotContextService } from "../services/hubspotContextService";
-import { successResponse } from "../utils/apiResponse";
+import { successResponse, errorResponse } from "../utils/apiResponse";
 import { AuthRequest, CreateTaskRequest, UpdateTaskRequest } from "../types";
 
 export const getTasks = async (
@@ -9,10 +9,15 @@ export const getTasks = async (
   next: NextFunction,
 ): Promise<void> => {
   try {
-    const { contactId, userTimeZone } = req.query;
+    const { contactId, userTimeZone, after } = req.query;
+    const limit = Math.min(50, parseInt(req.query.limit as string) || 20);
     const { syncService } = await HubSpotContextService.getContext(req.user!.id);
-    const tasks = await syncService.getTasksByContact(contactId as string, userTimeZone as string | undefined);
-    successResponse(res, tasks, "Tasks fetched successfully");
+    const result = await syncService.getTasksByContactPaginated(
+      contactId as string,
+      { limit, after: after as string | undefined },
+      userTimeZone as string | undefined,
+    );
+    successResponse(res, result, "Tasks fetched successfully");
   } catch (error) {
     next(error);
   }
@@ -28,8 +33,12 @@ export const createTask = async (
     const { syncService, ownerId } = await HubSpotContextService.getContext(req.user!.id);
     const task = await syncService.createTask(taskData, ownerId);
     successResponse(res, task, "Task created successfully", 201);
-  } catch (error) {
-    next(error);
+  } catch (error: any) {
+    if (error.statusCode === 400) {
+      errorResponse(res, error.message, 400);
+    } else {
+      next(error);
+    }
   }
 };
 
@@ -44,8 +53,12 @@ export const updateTask = async (
     const { syncService } = await HubSpotContextService.getContext(req.user!.id);
     const task = await syncService.updateTask(taskId, taskData);
     successResponse(res, task, "Task updated successfully");
-  } catch (error) {
-    next(error);
+  } catch (error: any) {
+    if (error.statusCode === 400) {
+      errorResponse(res, error.message, 400);
+    } else {
+      next(error);
+    }
   }
 };
 

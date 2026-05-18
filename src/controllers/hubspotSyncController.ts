@@ -308,6 +308,34 @@ export const getContactsByOwner = async (
   }
 };
 
+// Get all tasks for contacts owned by the authenticated user (single response, no pagination)
+export const getAllTasksByOwner = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const { ownerId, syncService } = await HubSpotContextService.getContext(req.user!.id);
+
+    if (!ownerId) {
+      errorResponse(res, "HubSpot owner ID not configured for this account", 400);
+      return;
+    }
+
+    let contacts = getCachedContacts(ownerId);
+    if (!contacts) {
+      contacts = await syncService.getAllContactsForOwner(ownerId);
+      setCachedContacts(ownerId, contacts);
+    }
+
+    const userTimeZone = (req.query.userTimeZone as string) || "UTC";
+    const tasks = await syncService.getAllTasksByContacts(contacts, userTimeZone);
+    successResponse(res, { tasks }, "Tasks fetched successfully");
+  } catch (error: any) {
+    next(error);
+  }
+};
+
 // Delete a HubSpot note
 export const deleteNote = async (
   req: AuthRequest,
