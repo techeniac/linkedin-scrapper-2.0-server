@@ -6,6 +6,7 @@ import { upsertMessages } from "../controllers/hubspotSyncController";
 import {
   createNote,
   getNotes,
+  getAllNotesByOwner,
   deleteNote,
   updateNote,
 } from "../controllers/hubspotSyncController";
@@ -21,6 +22,8 @@ import {
   checkProfile,
   getPropertyOptions,
   updateContact,
+  getContactsByOwner,
+  getAllContacts,
 } from "../controllers/hubspotSyncController";
 
 const router = Router();
@@ -89,13 +92,18 @@ router.patch(
 // DELETE /api/hubspot/tasks/:taskId - Delete a task
 router.delete("/tasks/:taskId", authenticate, deleteTask);
 
-// GET /api/hubspot/notes - Get all notes for a contact
+// GET /api/hubspot/notes/all - Get all notes for the authenticated user's contacts
+router.get("/notes/all", authenticate, getAllNotesByOwner);
+
+// GET /api/hubspot/notes - Get paginated notes for a contact
 router.get(
   "/notes",
   authenticate,
   userAwareLimiter,
   [
     query("contactId").trim().notEmpty().withMessage("contactId is required"),
+    query("limit").optional().isInt({ min: 1, max: 50 }).withMessage("limit must be 1-50"),
+    query("after").optional().trim(),
     validate,
   ],
   getNotes,
@@ -202,6 +210,41 @@ router.post(
     validate,
   ],
   syncLead,
+);
+
+// GET /api/hubspot/contacts/all - Get all contacts (cached, for client-side search)
+router.get("/contacts/all", authenticate, getAllContacts);
+
+// GET /api/hubspot/contacts - Get all contacts owned by the authenticated user
+// Query params: page, limit, search, sortBy, sortOrder
+router.get(
+  "/contacts",
+  authenticate,
+  [
+    query("page")
+      .optional()
+      .isInt({ min: 1 })
+      .withMessage("page must be a positive integer"),
+    query("limit")
+      .optional()
+      .isInt({ min: 1, max: 200 })
+      .withMessage("limit must be between 1 and 200"),
+    query("search")
+      .optional()
+      .trim()
+      .isLength({ max: 200 })
+      .withMessage("search too long"),
+    query("sortBy")
+      .optional()
+      .isIn(["firstname", "lastname", "email", "createdate", "lastmodifieddate"])
+      .withMessage("sortBy must be one of: firstname, lastname, email, createdate, lastmodifieddate"),
+    query("sortOrder")
+      .optional()
+      .isIn(["ascending", "descending", "ASCENDING", "DESCENDING"])
+      .withMessage("sortOrder must be ascending or descending"),
+    validate,
+  ],
+  getContactsByOwner,
 );
 
 // GET /api/hubspot/property-options - Get HubSpot property options

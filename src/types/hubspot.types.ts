@@ -145,3 +145,35 @@ export interface UpsertMessagesResponse {
   skipped: number;
   messages: MessageSyncResult[];
 }
+
+export interface ContactListItem {
+  id: string;
+  name: string;
+  email?: string;
+  company?: string;
+  phone?: string;
+}
+
+export interface NoteItem {
+  id: string;
+  noteTitle: string | null;
+  notes: string | null;
+  timestamp: string;
+  contactId?: string;
+  contactName?: string;
+  contactCompany?: string;
+}
+
+export interface PaginatedNotesResult {
+  notes: NoteItem[];
+  hasMore: boolean;
+  nextCursor: string | null;
+}
+
+export interface GetContactsByOwnerResponse {
+  contacts: ContactListItem[];
+  total: number;
+  page: number;
+  limit: number;
+  hasMore: boolean;
+}

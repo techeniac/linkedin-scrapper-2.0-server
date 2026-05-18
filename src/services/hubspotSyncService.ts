@@ -1,6 +1,6 @@
 // refactored: was ~1300-line monolith — now a facade that delegates to focused sub-services.
 // Public API and constructor signature are unchanged; all callers continue to work without modification.
-import { ContactData, CompanyData, SyncLeadResponse, CreateTaskRequest, UpdateTaskRequest, TaskResponse, LinkedInMessage, UpsertMessagesResponse } from "../types";
+import { ContactData, CompanyData, SyncLeadResponse, CreateTaskRequest, UpdateTaskRequest, TaskResponse, LinkedInMessage, UpsertMessagesResponse, GetContactsByOwnerResponse, PaginatedNotesResult } from "../types";
 import { HubSpotContactService } from "./hubspotContactService";
 import { HubSpotCompanyService } from "./hubspotCompanyService";
 import { HubSpotNoteService } from "./hubspotNoteService";
@@ -48,6 +48,17 @@ export class HubSpotSyncService {
     return this.contactService.getPropertyOptions();
   }
 
+  getContactsByOwner(
+    ownerId: string,
+    options?: Parameters<HubSpotContactService["getContactsByOwner"]>[1],
+  ): Promise<GetContactsByOwnerResponse> {
+    return this.contactService.getContactsByOwner(ownerId, options);
+  }
+
+  getAllContactsForOwner(ownerId: string) {
+    return this.contactService.getAllContactsForOwner(ownerId);
+  }
+
   // --- Company ---
   upsertCompany(company: CompanyData, ownerId?: string) {
     return this.companyService.upsertCompany(company, ownerId);
@@ -58,8 +69,24 @@ export class HubSpotSyncService {
     return this.noteService.createNote(data);
   }
 
-  getNotesByContact(contactId: string) {
-    return this.noteService.getNotesByContact(contactId);
+  getNotesByContact(
+    contactId: string,
+    options?: Parameters<HubSpotNoteService["getNotesByContact"]>[1],
+  ): Promise<PaginatedNotesResult> {
+    return this.noteService.getNotesByContact(contactId, options);
+  }
+
+  getNotesByOwner(
+    ownerId: string,
+    options?: Parameters<HubSpotNoteService["getNotesByOwner"]>[1],
+  ): Promise<PaginatedNotesResult> {
+    return this.noteService.getNotesByOwner(ownerId, options);
+  }
+
+  getAllNotesByContacts(
+    contacts: Parameters<HubSpotNoteService["getAllNotesByContacts"]>[0],
+  ) {
+    return this.noteService.getAllNotesByContacts(contacts);
   }
 
   updateNote(noteId: string, data: Parameters<HubSpotNoteService["updateNote"]>[1]) {

@@ -8,6 +8,7 @@ import {
   UpsertMessagesRequest,
 } from "../types/hubspot.types";
 import logger from "../utils/logger";
+import { getCachedContacts, setCachedContacts } from "../utils/contactsCache";
 
 // Sync LinkedIn lead (contact + company) to HubSpot
 export const syncLead = async (
@@ -168,21 +169,51 @@ export const createNote = async (
   }
 };
 
-// Get all notes associated with a HubSpot contact
+// Get paginated notes for a specific HubSpot contact
 export const getNotes = async (
   req: AuthRequest,
   res: Response,
   next: NextFunction,
 ): Promise<void> => {
   try {
-    const { contactId } = req.query;
+    const { contactId, after } = req.query;
+    const limit = Math.min(50, parseInt(req.query.limit as string) || 20);
 
-    const { userId, ownerId, syncService } =
-      await HubSpotContextService.getContext(req.user!.id);
+    const { syncService } = await HubSpotContextService.getContext(req.user!.id);
 
-    const notes = await syncService.getNotesByContact(contactId as string);
+    const result = await syncService.getNotesByContact(contactId as string, {
+      limit,
+      after: after as string | undefined,
+    });
 
-    successResponse(res, notes, "Notes fetched successfully");
+    successResponse(res, result, "Notes fetched successfully");
+  } catch (error: any) {
+    next(error);
+  }
+};
+
+// Get all notes for contacts owned by the authenticated user (single response, no pagination)
+export const getAllNotesByOwner = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const { ownerId, syncService } = await HubSpotContextService.getContext(req.user!.id);
+
+    if (!ownerId) {
+      errorResponse(res, "HubSpot owner ID not configured for this account", 400);
+      return;
+    }
+
+    let contacts = getCachedContacts(ownerId);
+    if (!contacts) {
+      contacts = await syncService.getAllContactsForOwner(ownerId);
+      setCachedContacts(ownerId, contacts);
+    }
+
+    const notes = await syncService.getAllNotesByContacts(contacts);
+    successResponse(res, { notes }, "Notes fetched successfully");
   } catch (error: any) {
     next(error);
   }
@@ -212,6 +243,71 @@ export const updateNote = async (
   }
 };
 
+// Get all contacts owned by the authenticated user (cached, for client-side search)
+export const getAllContacts = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const { ownerId, syncService } = await HubSpotContextService.getContext(req.user!.id);
+    if (!ownerId) { errorResponse(res, "HubSpot owner not configured", 400); return; }
+
+    let contacts = getCachedContacts(ownerId);
+    if (!contacts) {
+      contacts = await syncService.getAllContactsForOwner(ownerId);
+      setCachedContacts(ownerId, contacts);
+    }
+
+    successResponse(res, { contacts }, "Contacts fetched successfully");
+  } catch (error: any) {
+    next(error);
+  }
+};
+
+// Get all contacts owned by the authenticated user
+export const getContactsByOwner = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = Math.min(200, parseInt(req.query.limit as string) || 50);
+    const search = (req.query.search as string) || undefined;
+    const sortBy = (req.query.sortBy as string) || "firstname";
+    const sortOrder =
+      (req.query.sortOrder as string)?.toUpperCase() === "DESCENDING"
+        ? "DESCENDING"
+        : "ASCENDING";
+
+    const { ownerId, syncService } = await HubSpotContextService.getContext(
+      req.user!.id,
+    );
+
+    if (!ownerId) {
+      errorResponse(
+        res,
+        "HubSpot owner ID not configured for this account",
+        400,
+      );
+      return;
+    }
+
+    const result = await syncService.getContactsByOwner(ownerId, {
+      page,
+      limit,
+      search,
+      sortBy,
+      sortOrder,
+    });
+
+    successResponse(res, result, "Contacts fetched successfully");
+  } catch (error: any) {
+    next(error);
+  }
+};
+
 // Delete a HubSpot note
 export const deleteNote = async (
   req: AuthRequest,
@@ -221,7 +317,7 @@ export const deleteNote = async (
   try {
     const { noteId } = req.params;
 
-    const { userId, ownerId, syncService } =
+    const { syncService } =
       await HubSpotContextService.getContext(req.user!.id);
 
     await syncService.deleteNote(noteId);
@@ -257,7 +353,7 @@ export const upsertMessages = async (
 
     logger.info(`[Controller] Processing ${messages.length} messages`);
 
-    const { userId, ownerId, syncService } =
+    const { ownerId, syncService } =
       await HubSpotContextService.getContext(req.user!.id);
 
     logger.info(`[Controller] Starting message sync...`);
