@@ -1,6 +1,7 @@
 import { Response, NextFunction } from "express";
 import { HubSpotContextService } from "../services/hubspotContextService";
-import { successResponse, errorResponse } from "../utils/apiResponse";
+import { successResponse } from "../utils/apiResponse";
+import { ForbiddenError } from "../errors/AppError";
 import { AuthRequest, CreateTaskRequest, UpdateTaskRequest } from "../types";
 
 export const getTasks = async (
@@ -33,12 +34,8 @@ export const createTask = async (
     const { syncService, ownerId } = await HubSpotContextService.getContext(req.user!.id);
     const task = await syncService.createTask(taskData, ownerId);
     successResponse(res, task, "Task created successfully", 201);
-  } catch (error: any) {
-    if (error.statusCode === 400) {
-      errorResponse(res, error.message, 400);
-    } else {
-      next(error);
-    }
+  } catch (error) {
+    next(error);
   }
 };
 
@@ -50,15 +47,17 @@ export const updateTask = async (
   try {
     const { taskId } = req.params;
     const taskData: UpdateTaskRequest = req.body;
-    const { syncService } = await HubSpotContextService.getContext(req.user!.id);
+    const { ownerId, syncService } = await HubSpotContextService.getContext(req.user!.id);
+
+    const taskOwnerId = await syncService.getTaskOwner(taskId);
+    if (ownerId && taskOwnerId && taskOwnerId !== ownerId) {
+      throw new ForbiddenError();
+    }
+
     const task = await syncService.updateTask(taskId, taskData);
     successResponse(res, task, "Task updated successfully");
-  } catch (error: any) {
-    if (error.statusCode === 400) {
-      errorResponse(res, error.message, 400);
-    } else {
-      next(error);
-    }
+  } catch (error) {
+    next(error);
   }
 };
 
@@ -69,7 +68,13 @@ export const deleteTask = async (
 ): Promise<void> => {
   try {
     const { taskId } = req.params;
-    const { syncService } = await HubSpotContextService.getContext(req.user!.id);
+    const { ownerId, syncService } = await HubSpotContextService.getContext(req.user!.id);
+
+    const taskOwnerId = await syncService.getTaskOwner(taskId);
+    if (ownerId && taskOwnerId && taskOwnerId !== ownerId) {
+      throw new ForbiddenError();
+    }
+
     await syncService.deleteTask(taskId);
     successResponse(res, null, "Task deleted successfully");
   } catch (error) {

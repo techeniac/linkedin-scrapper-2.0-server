@@ -291,16 +291,23 @@ export class HubSpotTaskService {
       { headers: this.headers },
     );
 
-    const response = await axios.get(
-      `${this.baseUrl}/crm/v3/objects/tasks/${taskId}`,
-      {
-        params: {
-          properties:
-            "hs_task_subject,hs_task_body,hs_task_priority,hs_task_status,hubspot_owner_id,hs_timestamp,hs_task_reminders",
+    let response: any;
+    try {
+      response = await axios.get(
+        `${this.baseUrl}/crm/v3/objects/tasks/${taskId}`,
+        {
+          params: {
+            properties:
+              "hs_task_subject,hs_task_body,hs_task_priority,hs_task_status,hubspot_owner_id,hs_timestamp,hs_task_reminders",
+          },
+          headers: this.headers,
         },
-        headers: this.headers,
-      },
-    );
+      );
+    } catch (refetchError: any) {
+      // PATCH succeeded but re-fetch failed — surface a clear error so the
+      // client knows to reload rather than retry the update
+      throw new Error(`Task updated but could not retrieve updated data: ${refetchError.message}`);
+    }
 
     const task = response.data;
     const { dueDate, time } = parseHubSpotDateTime(task.properties.hs_timestamp, data.userTimeZone);
@@ -335,6 +342,19 @@ export class HubSpotTaskService {
       reminderCustomTime: reminderUpdateCustomTime,
       timestamp: task.updatedAt,
     };
+  }
+
+  async getTaskOwner(taskId: string): Promise<string | null> {
+    try {
+      const response = await axios.get(
+        `${this.baseUrl}/crm/v3/objects/tasks/${taskId}`,
+        { params: { properties: "hubspot_owner_id" }, headers: this.headers },
+      );
+      return response.data?.properties?.hubspot_owner_id || null;
+    } catch (error: any) {
+      if (error.response?.status === 404) return null;
+      throw error;
+    }
   }
 
   async deleteTask(taskId: string): Promise<void> {

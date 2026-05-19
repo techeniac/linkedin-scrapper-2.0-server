@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import { AuthService } from "../services/authService";
 import { successResponse } from "../utils/apiResponse";
+import { AppError } from "../errors/AppError";
 import { LoginRequest, RegisterRequest } from "../types";
 
 // Register a new user
@@ -14,6 +15,10 @@ export const register = async (
     const result = await AuthService.register(data);
     successResponse(res, result, "User registered successfully", 201);
   } catch (error: any) {
+    // Obscure "User already exists" to prevent email enumeration
+    if (error.message === "User already exists") {
+      return next(new AppError("Registration failed. Please check your details.", 400));
+    }
     next(error);
   }
 };
@@ -34,7 +39,7 @@ export const login = async (
 };
 
 // Logout user (client-side token removal)
-export const logout = async (req: Request, res: Response): Promise<void> => {
+export const logout = async (_req: Request, res: Response): Promise<void> => {
   successResponse(res, null, "Logout successful");
 };
 

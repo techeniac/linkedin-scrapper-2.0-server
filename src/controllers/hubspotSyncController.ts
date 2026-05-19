@@ -1,6 +1,7 @@
 import { Response, NextFunction } from "express";
 import { HubSpotContextService } from "../services/hubspotContextService";
-import { successResponse, errorResponse } from "../utils/apiResponse";
+import { successResponse } from "../utils/apiResponse";
+import { AppError, ForbiddenError, ValidationError } from "../errors/AppError";
 import { AuthRequest } from "../types";
 import {
   SyncLeadRequest,
@@ -19,7 +20,7 @@ export const syncLead = async (
   try {
     const { contact, company }: SyncLeadRequest = req.body;
 
-    const { userId, ownerId, syncService } =
+    const { ownerId, syncService } =
       await HubSpotContextService.getContext(req.user!.id);
 
     const result = await syncService.syncFullLead(
@@ -47,7 +48,7 @@ export const checkProfile = async (
   try {
     const { username } = req.query;
 
-    const { userId, ownerId, syncService } =
+    const { syncService } =
       await HubSpotContextService.getContext(req.user!.id);
 
     const contact = await syncService.findContactByProfileUrl(
@@ -89,7 +90,7 @@ export const getPropertyOptions = async (
   next: NextFunction,
 ): Promise<void> => {
   try {
-    const { userId, ownerId, syncService } =
+    const { syncService } =
       await HubSpotContextService.getContext(req.user!.id);
 
     const options = await syncService.getPropertyOptions();
@@ -108,7 +109,6 @@ export const updateContact = async (
   try {
     const { username } = req.query;
 
-    // Whitelist allowed properties
     const allowedFields = [
       "name",
       "email",
@@ -130,11 +130,10 @@ export const updateContact = async (
     }
 
     if (Object.keys(updates).length === 0) {
-      errorResponse(res, "No valid fields to update", 400);
-      return;
+      throw new ValidationError("No valid fields to update");
     }
 
-    const { userId, ownerId, syncService } =
+    const { syncService } =
       await HubSpotContextService.getContext(req.user!.id);
 
     await syncService.updateContactByUsername(username as string, updates);
@@ -153,7 +152,7 @@ export const createNote = async (
   try {
     const { noteTitle, notes, contactId }: CreateNoteRequest = req.body;
 
-    const { userId, ownerId, syncService } =
+    const { ownerId, syncService } =
       await HubSpotContextService.getContext(req.user!.id);
 
     const result = await syncService.createNote({
@@ -202,8 +201,7 @@ export const getAllNotesByOwner = async (
     const { ownerId, syncService } = await HubSpotContextService.getContext(req.user!.id);
 
     if (!ownerId) {
-      errorResponse(res, "HubSpot owner ID not configured for this account", 400);
-      return;
+      throw new AppError("HubSpot owner ID not configured for this account", 400);
     }
 
     let contacts = getCachedContacts(ownerId);
@@ -229,13 +227,15 @@ export const updateNote = async (
     const { noteId } = req.params;
     const { noteTitle, notes } = req.body;
 
-    const { userId, ownerId, syncService } =
+    const { ownerId, syncService } =
       await HubSpotContextService.getContext(req.user!.id);
 
-    await syncService.updateNote(noteId, {
-      noteTitle,
-      notes,
-    });
+    const noteOwnerId = await syncService.getNoteOwner(noteId);
+    if (ownerId && noteOwnerId && noteOwnerId !== ownerId) {
+      throw new ForbiddenError();
+    }
+
+    await syncService.updateNote(noteId, { noteTitle, notes });
 
     successResponse(res, null, "Note updated successfully");
   } catch (error: any) {
@@ -251,7 +251,10 @@ export const getAllContacts = async (
 ): Promise<void> => {
   try {
     const { ownerId, syncService } = await HubSpotContextService.getContext(req.user!.id);
-    if (!ownerId) { errorResponse(res, "HubSpot owner not configured", 400); return; }
+
+    if (!ownerId) {
+      throw new AppError("HubSpot owner not configured", 400);
+    }
 
     let contacts = getCachedContacts(ownerId);
     if (!contacts) {
@@ -286,12 +289,7 @@ export const getContactsByOwner = async (
     );
 
     if (!ownerId) {
-      errorResponse(
-        res,
-        "HubSpot owner ID not configured for this account",
-        400,
-      );
-      return;
+      throw new AppError("HubSpot owner ID not configured for this account", 400);
     }
 
     const result = await syncService.getContactsByOwner(ownerId, {
@@ -318,8 +316,7 @@ export const getAllTasksByOwner = async (
     const { ownerId, syncService } = await HubSpotContextService.getContext(req.user!.id);
 
     if (!ownerId) {
-      errorResponse(res, "HubSpot owner ID not configured for this account", 400);
-      return;
+      throw new AppError("HubSpot owner ID not configured for this account", 400);
     }
 
     let contacts = getCachedContacts(ownerId);
@@ -345,8 +342,13 @@ export const deleteNote = async (
   try {
     const { noteId } = req.params;
 
-    const { syncService } =
+    const { ownerId, syncService } =
       await HubSpotContextService.getContext(req.user!.id);
+
+    const noteOwnerId = await syncService.getNoteOwner(noteId);
+    if (ownerId && noteOwnerId && noteOwnerId !== ownerId) {
+      throw new ForbiddenError();
+    }
 
     await syncService.deleteNote(noteId);
 
@@ -356,7 +358,7 @@ export const deleteNote = async (
   }
 };
 
-// Update the upsertMessages controller in hubspotSyncController.ts
+// Upsert LinkedIn messages as HubSpot notes
 export const upsertMessages = async (
   req: AuthRequest,
   res: Response,
@@ -364,9 +366,6 @@ export const upsertMessages = async (
 ): Promise<void> => {
   try {
     logger.info(`[Controller] Received upsert messages request`);
-    logger.debug(
-      `[Controller] Request body: ${JSON.stringify(req.body, null, 2)}`,
-    );
 
     const { conversationKey, messages, userTimeZone }: UpsertMessagesRequest =
       req.body;
@@ -375,8 +374,7 @@ export const upsertMessages = async (
       logger.error(
         `[Controller] Invalid request: missing conversationKey or messages`,
       );
-      errorResponse(res, "conversationKey and messages are required", 400);
-      return;
+      throw new ValidationError("conversationKey and messages are required");
     }
 
     logger.info(`[Controller] Processing ${messages.length} messages`);

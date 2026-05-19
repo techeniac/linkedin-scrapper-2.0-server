@@ -89,6 +89,10 @@ export class HubSpotSyncService {
     return this.noteService.getAllNotesByContacts(contacts);
   }
 
+  getNoteOwner(noteId: string): Promise<string | null> {
+    return this.noteService.getNoteOwner(noteId);
+  }
+
   updateNote(noteId: string, data: Parameters<HubSpotNoteService["updateNote"]>[1]) {
     return this.noteService.updateNote(noteId, data);
   }
@@ -112,6 +116,10 @@ export class HubSpotSyncService {
 
   createTask(data: CreateTaskRequest, ownerId?: string): Promise<TaskResponse> {
     return this.taskService.createTask(data, ownerId);
+  }
+
+  getTaskOwner(taskId: string): Promise<string | null> {
+    return this.taskService.getTaskOwner(taskId);
   }
 
   updateTask(taskId: string, data: UpdateTaskRequest): Promise<TaskResponse> {

@@ -5,6 +5,14 @@ import logger from "../utils/logger";
 import { extractLinkedInHandle, getOwnerById, normalizeWebsite } from "./hubspotHelpers";
 import { HubSpotCompanyService } from "./hubspotCompanyService";
 
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 export class HubSpotContactService {
   private companyService: HubSpotCompanyService;
 
@@ -141,7 +149,6 @@ export class HubSpotContactService {
       lastname: contact.name.split(" ").slice(1).join(" ") || "",
       jobtitle: contact.selectedRole || contact.headline || "",
       company: contact.selectedCompany || "",
-      lifecyclestage: "",
       hs_linkedin_url: contact.profileUrl,
     };
 
@@ -160,7 +167,6 @@ export class HubSpotContactService {
     const payload = { inputs: [{ properties, idProperty, id: idValue }] };
 
     try {
-      logger.info(`[HubSpot] Contact payload: ${JSON.stringify(payload)}`);
       const response = await axios.post(
         `${this.baseUrl}/crm/v3/objects/contacts/batch/upsert`,
         payload,
@@ -317,11 +323,16 @@ export class HubSpotContactService {
       properties.contact_source = updates.connectedOnSource;
     if (updates.company) properties.company = updates.company;
 
-    await axios.patch(
-      `${this.baseUrl}/crm/v3/objects/contacts/${contact.id}`,
-      { properties },
-      { headers: this.headers },
-    );
+    try {
+      await axios.patch(
+        `${this.baseUrl}/crm/v3/objects/contacts/${contact.id}`,
+        { properties },
+        { headers: this.headers },
+      );
+    } catch (error: any) {
+      logger.error(`[HubSpot] updateContactByUsername failed: ${error.response?.status ?? error.message}`);
+      throw new Error(`Failed to update contact: ${error.response?.data?.message ?? error.message}`);
+    }
   }
 
   async associateContactToCompany(
@@ -426,13 +437,13 @@ export class HubSpotContactService {
 
   async addRichNotes(contactId: string, contact: ContactData): Promise<void> {
     let noteContent = `<b>LinkedIn Sync Details</b><br/>`;
-    noteContent += `Profile: ${contact.profileUrl}<br/>`;
-    noteContent += `Connected On: ${contact.connectedOn || "N/A"}<br/><br/>`;
+    noteContent += `Profile: ${escapeHtml(contact.profileUrl || "")}<br/>`;
+    noteContent += `Connected On: ${escapeHtml(contact.connectedOn || "N/A")}<br/><br/>`;
 
     if (contact.experiences?.length) {
       noteContent += `<b>Work History:</b><br/>`;
       contact.experiences.forEach((exp) => {
-        noteContent += `• ${exp.role} at ${exp.companyLine} (${exp.dates})<br/>`;
+        noteContent += `• ${escapeHtml(exp.role || "")} at ${escapeHtml(exp.companyLine || "")} (${escapeHtml(exp.dates || "")})<br/>`;
       });
     }
 
@@ -601,53 +612,42 @@ export class HubSpotContactService {
     connectedOnSources: Array<{ label: string; value: string }>;
   }> {
     const [
-      ownersResp,
-      lifecycleResp,
-      leadStatusResp,
-      leadSourceResp,
-      connectedOnResp,
-    ] = await Promise.all([
+      ownersResult,
+      lifecycleResult,
+      leadStatusResult,
+      leadSourceResult,
+      connectedOnResult,
+    ] = await Promise.allSettled([
       axios.get(`${this.baseUrl}/crm/v3/owners`, { headers: this.headers }),
-      axios.get(`${this.baseUrl}/crm/v3/properties/contact/lifecyclestage`, {
-        headers: this.headers,
-      }),
-      axios.get(`${this.baseUrl}/crm/v3/properties/contact/hs_lead_status`, {
-        headers: this.headers,
-      }),
-      axios.get(`${this.baseUrl}/crm/v3/properties/contact/approach`, {
-        headers: this.headers,
-      }),
-      axios.get(`${this.baseUrl}/crm/v3/properties/contact/contact_source`, {
-        headers: this.headers,
-      }),
+      axios.get(`${this.baseUrl}/crm/v3/properties/contact/lifecyclestage`, { headers: this.headers }),
+      axios.get(`${this.baseUrl}/crm/v3/properties/contact/hs_lead_status`, { headers: this.headers }),
+      axios.get(`${this.baseUrl}/crm/v3/properties/contact/approach`, { headers: this.headers }),
+      axios.get(`${this.baseUrl}/crm/v3/properties/contact/contact_source`, { headers: this.headers }),
     ]);
 
+    const safeData = (result: PromiseSettledResult<any>, key: string) => {
+      if (result.status === "rejected") {
+        logger.warn(`[HubSpot] getPropertyOptions: failed to fetch ${key}: ${result.reason?.message}`);
+        return null;
+      }
+      return result.value.data;
+    };
+
+    const ownersData = safeData(ownersResult, "owners");
+    const lifecycleData = safeData(lifecycleResult, "lifecyclestage");
+    const leadStatusData = safeData(leadStatusResult, "hs_lead_status");
+    const leadSourceData = safeData(leadSourceResult, "approach");
+    const connectedOnData = safeData(connectedOnResult, "contact_source");
+
     return {
-      owners: (ownersResp.data?.results || []).map((o: any) => ({
-        label:
-          [o.firstName, o.lastName].filter(Boolean).join(" ").trim() ||
-          o.email ||
-          o.id,
+      owners: (ownersData?.results || []).map((o: any) => ({
+        label: [o.firstName, o.lastName].filter(Boolean).join(" ").trim() || o.email || o.id,
         value: String(o.id),
       })),
-      lifecycleStages: (lifecycleResp.data?.options || []).map((opt: any) => ({
-        label: opt.label,
-        value: opt.value,
-      })),
-      leadStatuses: (leadStatusResp.data?.options || []).map((opt: any) => ({
-        label: opt.label,
-        value: opt.value,
-      })),
-      leadSources: (leadSourceResp.data?.options || []).map((opt: any) => ({
-        label: opt.label,
-        value: opt.value,
-      })),
-      connectedOnSources: (connectedOnResp.data?.options || []).map(
-        (opt: any) => ({
-          label: opt.label,
-          value: opt.value,
-        }),
-      ),
+      lifecycleStages: (lifecycleData?.options || []).map((opt: any) => ({ label: opt.label, value: opt.value })),
+      leadStatuses: (leadStatusData?.options || []).map((opt: any) => ({ label: opt.label, value: opt.value })),
+      leadSources: (leadSourceData?.options || []).map((opt: any) => ({ label: opt.label, value: opt.value })),
+      connectedOnSources: (connectedOnData?.options || []).map((opt: any) => ({ label: opt.label, value: opt.value })),
     };
   }
 }

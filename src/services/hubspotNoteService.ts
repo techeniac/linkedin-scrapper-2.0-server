@@ -347,24 +347,44 @@ export class HubSpotNoteService {
     return { notes: filtered, hasMore: nextCursor !== null, nextCursor };
   }
 
+  async getNoteOwner(noteId: string): Promise<string | null> {
+    try {
+      const response = await axios.get(
+        `${this.baseUrl}/crm/v3/objects/notes/${noteId}`,
+        { params: { properties: "hubspot_owner_id" }, headers: this.headers },
+      );
+      return response.data?.properties?.hubspot_owner_id || null;
+    } catch (error: any) {
+      if (error.response?.status === 404) return null;
+      throw error;
+    }
+  }
+
   async updateNote(noteId: string, data: { noteTitle?: string; notes: string }) {
     let noteBody = data.notes;
     if (data.noteTitle) {
       noteBody = `<b>${data.noteTitle}</b><br/><br/>` + data.notes;
     }
 
-    const response = await axios.patch(
-      `${this.baseUrl}/crm/v3/objects/notes/${noteId}`,
-      { properties: { hs_note_body: noteBody } },
-      { headers: this.headers },
-    );
-
-    return response.data;
+    try {
+      const response = await axios.patch(
+        `${this.baseUrl}/crm/v3/objects/notes/${noteId}`,
+        { properties: { hs_note_body: noteBody } },
+        { headers: this.headers },
+      );
+      return response.data;
+    } catch (error: any) {
+      throw new Error(`Failed to update note: ${error.response?.data?.message ?? error.message}`);
+    }
   }
 
   async deleteNote(noteId: string): Promise<void> {
-    await axios.delete(`${this.baseUrl}/crm/v3/objects/notes/${noteId}`, {
-      headers: this.headers,
-    });
+    try {
+      await axios.delete(`${this.baseUrl}/crm/v3/objects/notes/${noteId}`, {
+        headers: this.headers,
+      });
+    } catch (error: any) {
+      throw new Error(`Failed to delete note: ${error.response?.data?.message ?? error.message}`);
+    }
   }
 }

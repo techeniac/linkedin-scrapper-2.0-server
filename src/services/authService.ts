@@ -13,8 +13,12 @@ export class AuthService {
   }
 
   // Verify and decode JWT token
-  static verifyToken(token: string): any {
-    return jwt.verify(token, JWT_SECRET);
+  static verifyToken(token: string): { userId: string } {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    if (typeof decoded === "string" || !decoded || !(decoded as any).userId) {
+      throw new Error("Invalid token payload");
+    }
+    return decoded as { userId: string };
   }
 
   // Register new user and return JWT token
