@@ -29,6 +29,7 @@ const router = Router();
 router.get(
   "/tasks",
   authenticate,
+  userAwareLimiter,
   [
     query("contactId").trim().notEmpty().withMessage("contactId is required"),
     validate,
@@ -87,7 +88,7 @@ router.patch(
 );
 
 // DELETE /api/hubspot/tasks/:taskId - Delete a task
-router.delete("/tasks/:taskId", authenticate, deleteTask);
+router.delete("/tasks/:taskId", authenticate, userAwareLimiter, deleteTask);
 
 // GET /api/hubspot/notes - Get all notes for a contact
 router.get(
@@ -117,7 +118,7 @@ router.patch(
 );
 
 // DELETE /api/hubspot/notes/:noteId - Delete a note
-router.delete("/notes/:noteId", authenticate, deleteNote);
+router.delete("/notes/:noteId", authenticate, userAwareLimiter, deleteNote);
 
 // POST /api/hubspot/create-note - Create a new note
 router.post(
@@ -139,6 +140,7 @@ router.post(
 router.get(
   "/check-profile",
   authenticate,
+  userAwareLimiter,
   [
     query("username")
       .trim()
@@ -205,7 +207,12 @@ router.post(
 );
 
 // GET /api/hubspot/property-options - Get HubSpot property options
-router.get("/property-options", authenticate, getPropertyOptions);
+router.get(
+  "/property-options",
+  authenticate,
+  userAwareLimiter,
+  getPropertyOptions,
+);
 
 // PATCH /api/hubspot/update-contact - Update HubSpot contact
 router.patch(

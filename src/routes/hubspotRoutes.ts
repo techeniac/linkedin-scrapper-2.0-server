@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { authenticate } from "../middlewares/auth";
+import { userAwareLimiter } from "../middlewares/rateLimiter";
 import { HubSpotOAuthService } from "../services/hubspotOAuthService";
 import { successResponse, errorResponse } from "../utils/apiResponse";
 import { AuthRequest } from "../types";
@@ -9,7 +10,11 @@ import hubspotSyncRoutes from "./hubspotSyncRoutes";
 const router = Router();
 
 // GET /api/hubspot/connect - Generate HubSpot OAuth URL
-router.get("/connect", authenticate, async (req: AuthRequest, res) => {
+router.get(
+  "/connect",
+  authenticate,
+  userAwareLimiter,
+  async (req: AuthRequest, res) => {
   try {
     const authUrl = await HubSpotOAuthService.getAuthUrl(req.user!.id);
     successResponse(res, { authUrl }, "HubSpot auth URL generated");
@@ -69,7 +74,11 @@ router.get("/callback", async (req, res) => {
 });
 
 // POST /api/hubspot/disconnect - Remove HubSpot connection
-router.post("/disconnect", authenticate, async (req: AuthRequest, res) => {
+router.post(
+  "/disconnect",
+  authenticate,
+  userAwareLimiter,
+  async (req: AuthRequest, res) => {
   try {
     await HubSpotOAuthService.disconnectUser(req.user!.id);
     successResponse(res, null, "HubSpot connection removed");
@@ -79,7 +88,11 @@ router.post("/disconnect", authenticate, async (req: AuthRequest, res) => {
 });
 
 // GET /api/hubspot/status - Check HubSpot connection status
-router.get("/status", authenticate, async (req: AuthRequest, res) => {
+router.get(
+  "/status",
+  authenticate,
+  userAwareLimiter,
+  async (req: AuthRequest, res) => {
   try {
     const user = await prisma.user.findUnique({
       where: { id: req.user!.id },
