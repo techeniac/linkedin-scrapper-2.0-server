@@ -1,6 +1,7 @@
 import prisma from "../config/prisma";
 import { HubSpotOAuthService } from "./hubspotOAuthService";
 import { HubSpotSyncService } from "./hubspotSyncService";
+import { AppError } from "../errors/AppError";
 
 // Context object for HubSpot sync operations
 export interface HubSpotContext {
@@ -16,9 +17,7 @@ export class HubSpotContextService {
     const user = await prisma.user.findUnique({ where: { id: userId } });
 
     if (!user?.hubspotAccessToken || !user?.hubspotRefreshToken) {
-      const err: any = new Error("HubSpot connection required");
-      err.statusCode = 400;
-      throw err;
+      throw new AppError("HubSpot connection required", 400);
     }
 
     const accessToken = await HubSpotOAuthService.getValidAccessToken(userId);

@@ -1,6 +1,6 @@
 // refactored: was ~1300-line monolith — now a facade that delegates to focused sub-services.
 // Public API and constructor signature are unchanged; all callers continue to work without modification.
-import { ContactData, CompanyData, SyncLeadResponse, CreateTaskRequest, UpdateTaskRequest, TaskResponse, LinkedInMessage, UpsertMessagesResponse } from "../types";
+import { ContactData, CompanyData, SyncLeadResponse, CreateTaskRequest, UpdateTaskRequest, TaskResponse, TaskItem, LinkedInMessage, UpsertMessagesResponse, GetContactsByOwnerResponse, PaginatedNotesResult } from "../types";
 import { HubSpotContactService } from "./hubspotContactService";
 import { HubSpotCompanyService } from "./hubspotCompanyService";
 import { HubSpotNoteService } from "./hubspotNoteService";
@@ -48,6 +48,17 @@ export class HubSpotSyncService {
     return this.contactService.getPropertyOptions();
   }
 
+  getContactsByOwner(
+    ownerId: string,
+    options?: Parameters<HubSpotContactService["getContactsByOwner"]>[1],
+  ): Promise<GetContactsByOwnerResponse> {
+    return this.contactService.getContactsByOwner(ownerId, options);
+  }
+
+  getAllContactsForOwner(ownerId: string) {
+    return this.contactService.getAllContactsForOwner(ownerId);
+  }
+
   // --- Company ---
   upsertCompany(company: CompanyData, ownerId?: string) {
     return this.companyService.upsertCompany(company, ownerId);
@@ -58,8 +69,28 @@ export class HubSpotSyncService {
     return this.noteService.createNote(data);
   }
 
-  getNotesByContact(contactId: string) {
-    return this.noteService.getNotesByContact(contactId);
+  getNotesByContact(
+    contactId: string,
+    options?: Parameters<HubSpotNoteService["getNotesByContact"]>[1],
+  ): Promise<PaginatedNotesResult> {
+    return this.noteService.getNotesByContact(contactId, options);
+  }
+
+  getNotesByOwner(
+    ownerId: string,
+    options?: Parameters<HubSpotNoteService["getNotesByOwner"]>[1],
+  ): Promise<PaginatedNotesResult> {
+    return this.noteService.getNotesByOwner(ownerId, options);
+  }
+
+  getAllNotesByContacts(
+    contacts: Parameters<HubSpotNoteService["getAllNotesByContacts"]>[0],
+  ) {
+    return this.noteService.getAllNotesByContacts(contacts);
+  }
+
+  getNoteOwner(noteId: string): Promise<string | null> {
+    return this.noteService.getNoteOwner(noteId);
   }
 
   updateNote(noteId: string, data: Parameters<HubSpotNoteService["updateNote"]>[1]) {
@@ -75,8 +106,20 @@ export class HubSpotSyncService {
     return this.taskService.getTasksByContact(contactId, userTimeZone);
   }
 
+  getTasksByContactPaginated(
+    contactId: string,
+    options?: { limit?: number; after?: string },
+    userTimeZone?: string,
+  ) {
+    return this.taskService.getTasksByContactPaginated(contactId, options, userTimeZone);
+  }
+
   createTask(data: CreateTaskRequest, ownerId?: string): Promise<TaskResponse> {
     return this.taskService.createTask(data, ownerId);
+  }
+
+  getTaskOwner(taskId: string): Promise<string | null> {
+    return this.taskService.getTaskOwner(taskId);
   }
 
   updateTask(taskId: string, data: UpdateTaskRequest): Promise<TaskResponse> {
@@ -90,5 +133,12 @@ export class HubSpotSyncService {
   // --- Messages ---
   upsertLinkedInMessages(conversationKey: string, messages: LinkedInMessage[], ownerId?: string, userTimeZone?: string): Promise<UpsertMessagesResponse> {
     return this.messageService.upsertLinkedInMessages(conversationKey, messages, ownerId, userTimeZone);
+  }
+
+  getAllTasksByContacts(
+    contacts: Parameters<HubSpotTaskService["getAllTasksByContacts"]>[0],
+    userTimeZone?: string,
+  ): Promise<TaskItem[]> {
+    return this.taskService.getAllTasksByContacts(contacts, userTimeZone);
   }
 }

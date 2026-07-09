@@ -12,8 +12,6 @@ export interface ApiResponse<T = any> {
 export interface HealthData {
   status: string;
   timestamp: string;
-  uptime: number;
-  environment: string;
 }
 
 // User entity with optional HubSpot OAuth fields

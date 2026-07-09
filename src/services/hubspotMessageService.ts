@@ -5,8 +5,20 @@ import {
   MessageSyncResult,
 } from "../types";
 import logger from "../utils/logger";
-import { extractLinkedInHandle, generateThreadId, resolveTimeZone } from "./hubspotHelpers";
+import {
+  extractLinkedInHandle,
+  generateThreadId,
+  resolveTimeZone,
+} from "./hubspotHelpers";
 import { HubSpotContactService } from "./hubspotContactService";
+
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
 
 // YYYY-MM-DD in the given IANA zone.
 function getLocalDate(iso: string, timeZone: string): string {
@@ -113,10 +125,16 @@ export class HubSpotMessageService {
   } {
     for (const message of messages) {
       if (message.sender.distance !== "SELF") {
-        return { name: message.sender.name, profileUrl: message.sender.profileUrl };
+        return {
+          name: message.sender.name,
+          profileUrl: message.sender.profileUrl,
+        };
       }
       if (message.receiver.distance !== "SELF") {
-        return { name: message.receiver.name, profileUrl: message.receiver.profileUrl };
+        return {
+          name: message.receiver.name,
+          profileUrl: message.receiver.profileUrl,
+        };
       }
     }
     throw new Error("Could not identify contact from messages");
@@ -153,9 +171,9 @@ export class HubSpotMessageService {
     let body = "";
     for (const message of messages) {
       const time = formatLocalTime(message.sentAt, timeZone);
-      body += `<p><strong>${message.sender.name}</strong> - `;
+      body += `<p><strong>${escapeHtml(message.sender.name)}</strong> - `;
       body += `<strong>Time:</strong> ${time}</p>`;
-      body += `<p>${message.text.replace(/\n/g, "<br/>")}</p>`;
+      body += `<p>${escapeHtml(message.text).replace(/\n/g, "<br/>")}</p>`;
       body += `<br/>`;
     }
     return body;
@@ -181,10 +199,6 @@ export class HubSpotMessageService {
           inputs: commIds.map((id: string) => ({ id })),
         },
         { headers: this.headers },
-      );
-
-      logger.warn(
-        `[DEBUG] Existing communications response: ${JSON.stringify(commsResponse.data.results, null, 2)}`,
       );
 
       return (commsResponse.data.results || []).map((comm: any) => ({
@@ -242,10 +256,6 @@ export class HubSpotMessageService {
       hs_timestamp: activityTimestamp,
     };
     if (ownerId) properties.hubspot_owner_id = ownerId;
-
-    logger.info(
-      `[DEBUG] Creating new communication for date ${date}, payload: ${JSON.stringify({ properties }, null, 2)}`,
-    );
 
     const response = await axios.post(
       `${this.baseUrl}/crm/v3/objects/communications`,

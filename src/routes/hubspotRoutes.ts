@@ -2,10 +2,13 @@ import { Router } from "express";
 import { authenticate } from "../middlewares/auth";
 import { userAwareLimiter } from "../middlewares/rateLimiter";
 import { HubSpotOAuthService } from "../services/hubspotOAuthService";
-import { successResponse, errorResponse } from "../utils/apiResponse";
+import { successResponse } from "../utils/apiResponse";
 import { AuthRequest } from "../types";
 import prisma from "../config/prisma";
+import logger from "../utils/logger";
+import { apiLimiter } from "../middlewares/rateLimiter";
 import hubspotSyncRoutes from "./hubspotSyncRoutes";
+import { asyncHandler } from "../utils/asyncHandler";
 
 const router = Router();
 
@@ -14,17 +17,15 @@ router.get(
   "/connect",
   authenticate,
   userAwareLimiter,
-  async (req: AuthRequest, res) => {
-  try {
+  asyncHandler<AuthRequest>(async (req, res) => {
     const authUrl = await HubSpotOAuthService.getAuthUrl(req.user!.id);
     successResponse(res, { authUrl }, "HubSpot auth URL generated");
-  } catch (error: any) {
-    errorResponse(res, error.message, 500);
-  }
-});
+  }),
+);
 
 // GET /api/hubspot/callback - OAuth callback with state validation
-router.get("/callback", async (req, res) => {
+// Intentionally keeps local error handling: this route must return HTML, not JSON.
+router.get("/callback", apiLimiter, async (req, res) => {
   const { code, state } = req.query;
 
   if (!code || !state || typeof state !== "string") {
@@ -36,13 +37,8 @@ router.get("/callback", async (req, res) => {
   }
 
   try {
-    // Validate state and get userId
     const userId = await HubSpotOAuthService.validateState(state);
-
-    const result = await HubSpotOAuthService.connectUser(
-      userId,
-      code as string,
-    );
+    const result = await HubSpotOAuthService.connectUser(userId, code as string);
 
     const ownerText = result.ownerId || "Standard User";
     res.send(`
@@ -65,6 +61,7 @@ router.get("/callback", async (req, res) => {
       </html>
     `);
   } catch (error: any) {
+    logger.error(`[HubSpot OAuth] Callback failed: ${error.message}`);
     res
       .status(500)
       .send(
@@ -78,22 +75,18 @@ router.post(
   "/disconnect",
   authenticate,
   userAwareLimiter,
-  async (req: AuthRequest, res) => {
-  try {
+  asyncHandler<AuthRequest>(async (req, res) => {
     await HubSpotOAuthService.disconnectUser(req.user!.id);
     successResponse(res, null, "HubSpot connection removed");
-  } catch (error: any) {
-    errorResponse(res, error.message, 500);
-  }
-});
+  }),
+);
 
 // GET /api/hubspot/status - Check HubSpot connection status
 router.get(
   "/status",
   authenticate,
   userAwareLimiter,
-  async (req: AuthRequest, res) => {
-  try {
+  asyncHandler<AuthRequest>(async (req, res) => {
     const user = await prisma.user.findUnique({
       where: { id: req.user!.id },
     });
@@ -102,10 +95,8 @@ router.get(
       connected: !!user?.hubspotAccessToken,
       ownerId: user?.hubspotOwnerId,
     });
-  } catch (error: any) {
-    errorResponse(res, error.message, 500);
-  }
-});
+  }),
+);
 
 // Mount HubSpot sync routes
 router.use("/", hubspotSyncRoutes);

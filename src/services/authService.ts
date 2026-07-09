@@ -31,9 +31,13 @@ export class AuthService {
     return this.generateAccessToken(userId);
   }
 
-  // Verify and decode an access token.
-  static verifyToken(token: string): any {
-    return jwt.verify(token, JWT_SECRET);
+  // Verify and decode an access token; validates the payload shape.
+  static verifyToken(token: string): { userId: string } {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    if (typeof decoded === "string" || !decoded || !(decoded as any).userId) {
+      throw new Error("Invalid token payload");
+    }
+    return decoded as { userId: string };
   }
 
   // Register a new user; returns the user (with access token) + refresh token.
