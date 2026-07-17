@@ -2,6 +2,7 @@ import app from "./app";
 import { PORT } from "./config/env";
 import logger from "./utils/logger";
 import prisma from "./config/prisma";
+import { prewarmConnectedOwners } from "./services/hubspotOwnersService";
 
 // Establish DB connection before accepting any requests
 let server: ReturnType<typeof app.listen>;
@@ -12,6 +13,8 @@ prisma
     logger.info("Prisma connected to database");
     server = app.listen(PORT, () => {
       logger.info(`Server running on port ${PORT}`);
+      // Warm the connected-owners cache so the first reporting request is fast.
+      prewarmConnectedOwners();
     });
   })
   .catch((error: any) => {

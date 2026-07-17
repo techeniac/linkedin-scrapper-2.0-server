@@ -1,6 +1,21 @@
 // src/services/connectionService.ts
-import { ConnectionRequestStatus } from "@prisma/client";
+import { ConnectionRequestStatus, Prisma } from "@prisma/client";
 import prisma from "../config/prisma";
+
+// Read params for the public, paginated connections list.
+export interface ListConnectionsParams {
+  page: number;
+  limit: number;
+  sortBy?: string;
+  sortOrder?: "asc" | "desc";
+  search?: string;
+  userId?: string;
+  userIds?: string[]; // restrict to a set of owners (used when no single userId)
+  actorLinkedinId?: string; // the logged-in LinkedIn account that sent the request
+  status?: ConnectionRequestStatus;
+  sentFrom?: Date;
+  sentTo?: Date;
+}
 
 /**
  * LinkedIn connection-request tracking.
@@ -287,12 +302,26 @@ export class ConnectionService {
     });
   }
 
-  /** Aggregate counts for one user, or globally when userId is omitted. */
-  static async getStats(userId?: string): Promise<ConnectionStats> {
+  /**
+   * Aggregate counts. Scope:
+   *   - `userId` set        → that single user
+   *   - `restrictUserIds`   → only those users (e.g. HubSpot-connected owners)
+   *   - neither             → global (all users)
+   */
+  static async getStats(
+    userId?: string,
+    restrictUserIds?: string[],
+  ): Promise<ConnectionStats> {
+    const where: Prisma.ConnectionRequestWhereInput = userId
+      ? { userId }
+      : restrictUserIds
+        ? { userId: { in: restrictUserIds } }
+        : {};
+
     const grouped = await prisma.connectionRequest.groupBy({
       by: ["status"],
       _count: { _all: true },
-      ...(userId && { where: { userId } }),
+      where,
     });
 
     const stats: ConnectionStats = {
@@ -334,5 +363,120 @@ export class ConnectionService {
       this.getStats(),
     ]);
     return { user, global };
+  }
+
+  // Columns a client is allowed to sort by (guards against arbitrary orderBy).
+  private static readonly SORT_COLUMNS = new Set([
+    "sentAt",
+    "resolvedAt",
+    "status",
+    "targetName",
+    "createdAt",
+  ]);
+
+  /** Paginated / filtered / sorted list of connection rows (public read). */
+  static async list(p: ListConnectionsParams): Promise<{
+    data: unknown[];
+    metadata: { total: number; page: number; limit: number; totalPages: number };
+  }> {
+    const page = Math.max(1, p.page || 1);
+    const limit = Math.min(100, Math.max(1, p.limit || 10));
+    const sortBy = this.SORT_COLUMNS.has(p.sortBy ?? "") ? (p.sortBy as string) : "sentAt";
+    const sortOrder: "asc" | "desc" = p.sortOrder === "asc" ? "asc" : "desc";
+
+    const where: Prisma.ConnectionRequestWhereInput = {};
+    if (p.userId) where.userId = p.userId;
+    else if (p.userIds) where.userId = { in: p.userIds };
+    if (p.actorLinkedinId) where.actorLinkedinId = p.actorLinkedinId;
+    if (p.status) where.status = p.status;
+    if (p.sentFrom || p.sentTo) {
+      where.sentAt = {};
+      if (p.sentFrom) where.sentAt.gte = p.sentFrom;
+      if (p.sentTo) where.sentAt.lte = p.sentTo;
+    }
+    if (p.search) {
+      where.OR = [
+        { targetName: { contains: p.search, mode: "insensitive" } },
+        { actorName: { contains: p.search, mode: "insensitive" } },
+        { targetProfileUrl: { contains: p.search, mode: "insensitive" } },
+      ];
+    }
+
+    const [data, total] = await prisma.$transaction([
+      prisma.connectionRequest.findMany({
+        where,
+        orderBy: { [sortBy]: sortOrder } as Prisma.ConnectionRequestOrderByWithRelationInput,
+        skip: (page - 1) * limit,
+        take: limit,
+        select: {
+          id: true,
+          userId: true, // so the controller can map the owner to its HubSpot name
+          targetName: true,
+          targetProfileUrl: true,
+          targetLinkedinId: true,
+          actorName: true,
+          status: true,
+          sentAt: true,
+          resolvedAt: true,
+          user: { select: { name: true } }, // DB-name fallback
+        },
+      }),
+      prisma.connectionRequest.count({ where }),
+    ]);
+
+    return {
+      data,
+      metadata: { total, page, limit, totalPages: Math.max(1, Math.ceil(total / limit)) },
+    };
+  }
+
+  /**
+   * Per-day connection breakdown between [from, to] (inclusive), bucketed by
+   * sent_at. Each day carries every status count for the grouped bar chart.
+   */
+  static async getSeries(
+    userId: string | undefined,
+    from: Date,
+    to: Date,
+    restrictUserIds?: string[],
+    actorLinkedinId?: string,
+    granularity: "day" | "week" | "month" = "day",
+  ): Promise<
+    Array<{
+      date: string;
+      sent: number;
+      accepted: number;
+      pending: number;
+      ignored: number;
+      withdrawn: number;
+    }>
+  > {
+    const ownerFilter = userId
+      ? Prisma.sql`AND user_id = ${userId}`
+      : restrictUserIds
+        ? Prisma.sql`AND user_id = ANY(${restrictUserIds})`
+        : Prisma.empty;
+    const accountFilter = actorLinkedinId
+      ? Prisma.sql`AND actor_linkedin_id = ${actorLinkedinId}`
+      : Prisma.empty;
+    // Whitelisted bucket unit for date_trunc (day / week[Mon start] / month).
+    const bucket =
+      granularity === "week" ? "week" : granularity === "month" ? "month" : "day";
+
+    // `date` is the bucket-start (Mon for week, 1st for month) as YYYY-MM-DD.
+    return prisma.$queryRaw`
+      SELECT to_char(date_trunc(${bucket}, sent_at), 'YYYY-MM-DD') AS date,
+             COUNT(*)::int AS sent,
+             COUNT(*) FILTER (WHERE status = 'ACCEPTED')::int     AS accepted,
+             COUNT(*) FILTER (WHERE status = 'PENDING')::int      AS pending,
+             COUNT(*) FILTER (WHERE status = 'NOT_ACCEPTED')::int AS ignored,
+             COUNT(*) FILTER (WHERE status = 'WITHDRAWN')::int    AS withdrawn
+      FROM connection_requests
+      WHERE sent_at >= ${from} AND sent_at <= ${to}
+        ${ownerFilter}
+        ${accountFilter}
+      GROUP BY 1
+      ORDER BY 1
+    `;
   }
 }

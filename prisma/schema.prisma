@@ -65,6 +65,9 @@ model ConnectionRequest {
   @@unique([userId, targetLinkedinId])
   @@index([userId])
   @@index([status])
+  @@index([sentAt])
+  @@index([userId, sentAt])
+  @@index([actorLinkedinId])
   @@map("connection_requests")
 }
 
@@ -99,6 +102,9 @@ model MessageActivity {
 
   @@unique([userId, conversationKey])
   @@index([userId])
+  @@index([lastMessageAt])
+  @@index([userId, lastMessageAt])
+  @@index([selfLinkedinId])
   @@map("message_activity")
 }
 
