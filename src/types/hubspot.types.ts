@@ -80,6 +80,8 @@ export interface CreateTaskRequest {
   status: string;
   assignedTo?: string;
   comment?: string;
+  reminder?: string;
+  reminderCustomDatetime?: string;
   contactId?: string;
   userTimeZone?: string;
 }
@@ -92,6 +94,8 @@ export interface UpdateTaskRequest {
   status: string;
   assignedTo?: string;
   comment?: string;
+  reminder?: string;
+  reminderCustomDatetime?: string;
   userTimeZone?: string;
 }
 
@@ -104,6 +108,9 @@ export interface TaskResponse {
   status: string;
   assignedTo?: string | null;
   comment?: string | null;
+  reminder?: string | null;
+  reminderCustomDate?: string | null;
+  reminderCustomTime?: string | null;
   timestamp: string;
 }
 
@@ -144,4 +151,54 @@ export interface UpsertMessagesResponse {
   synced: number;
   skipped: number;
   messages: MessageSyncResult[];
+}
+
+export interface ContactListItem {
+  id: string;
+  name: string;
+  email?: string;
+  company?: string;
+  phone?: string;
+}
+
+export interface NoteItem {
+  id: string;
+  noteTitle: string | null;
+  notes: string | null;
+  timestamp: string;
+  contactId?: string;
+  contactName?: string;
+  contactCompany?: string;
+}
+
+export interface PaginatedNotesResult {
+  notes: NoteItem[];
+  hasMore: boolean;
+  nextCursor: string | null;
+}
+
+export interface TaskItem {
+  id: string;
+  taskName: string;
+  dueDate: string | null;
+  time: string | null;
+  priority: string;
+  status: string;
+  assignedTo: string | null;
+  comment: string | null;
+  reminder?: string | null;
+  reminderCustomDate?: string | null;
+  reminderCustomTime?: string | null;
+  timestamp: string;
+  contactId?: string;
+  contactName?: string;
+  contactCompany?: string;
+}
+
+export interface GetContactsByOwnerResponse {
+  contacts: ContactListItem[];
+  total: number;
+  page: number;
+  limit: number;
+  hasMore: boolean;
 }

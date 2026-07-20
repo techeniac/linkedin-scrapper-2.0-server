@@ -8,6 +8,13 @@ import { ALLOWED_ORIGINS, NODE_ENV } from "./config/env";
 
 const app: Application = express();
 
+// Trust the first proxy hop (Vercel / any reverse proxy) so req.ip and
+// express-rate-limit read the real client IP from X-Forwarded-For instead of
+// the proxy's. Without this, express-rate-limit throws
+// ERR_ERL_UNEXPECTED_X_FORWARDED_FOR. Use a fixed hop count (not `true`) so a
+// client cannot spoof X-Forwarded-For to evade rate limiting.
+app.set("trust proxy", 1);
+
 // Security middleware - sets various HTTP headers
 app.use(helmet());
 
@@ -36,8 +43,8 @@ app.use(
 );
 
 // Body parsing middleware with size limits
-app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+app.use(express.json({ limit: "1mb" }));
+app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 
 // HTTP request logging
 app.use(requestLogger);

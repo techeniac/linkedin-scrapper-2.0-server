@@ -20,7 +20,125 @@ model User {
   createdAt             DateTime  @default(now()) @map("created_at")
   updatedAt             DateTime  @updatedAt @map("updated_at")
 
+  refreshTokens      RefreshToken[]
+  passwordResetCodes PasswordResetCode[]
+  connectionRequests ConnectionRequest[]
+  messageActivity    MessageActivity[]
+
   @@map("users")
+}
+
+// Lifecycle status of a LinkedIn connection request we sent on a user's behalf.
+// LinkedIn only reliably exposes "sent" + "pending"; ACCEPTED is inferred when
+// the target later resolves to a 1st-degree connection, WITHDRAWN when the user
+// retracts the invite, and NOT_ACCEPTED covers declined / ignored / expired.
+enum ConnectionRequestStatus {
+  PENDING
+  ACCEPTED
+  NOT_ACCEPTED
+  WITHDRAWN
+}
+
+// One row per connection request a user sent. "Sent" is the total row count;
+// the four statuses partition those rows. Unique per (user, target) so a
+// re-send updates the existing row instead of duplicating it.
+model ConnectionRequest {
+  id               String                  @id @default(uuid())
+  userId           String                  @map("user_id")
+  user             User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Target (B'): the LinkedIn profile the request was sent TO.
+  targetLinkedinId String                  @map("target_linkedin_id")
+  targetProfileUrl String?                 @map("target_profile_url")
+  targetName       String?                 @map("target_name")
+  // Actor (B): the LinkedIn account logged into the browser that SENT the
+  // request. Distinct from userId (A), the extension/app account — one app user
+  // may operate several LinkedIn accounts, so the actor is stored per row.
+  actorLinkedinId        String?           @map("actor_linkedin_id")
+  actorName              String?           @map("actor_name")
+  actorPublicIdentifier  String?           @map("actor_public_identifier")
+  status           ConnectionRequestStatus @default(PENDING)
+  sentAt           DateTime                @default(now()) @map("sent_at")
+  resolvedAt       DateTime?               @map("resolved_at")
+  createdAt        DateTime                @default(now()) @map("created_at")
+  updatedAt        DateTime                @updatedAt @map("updated_at")
+
+  @@unique([userId, targetLinkedinId])
+  @@index([userId])
+  @@index([status])
+  @@index([sentAt])
+  @@index([userId, sentAt])
+  @@index([actorLinkedinId])
+  @@map("connection_requests")
+}
+
+// Per-user messaging metrics, one row per conversation. Derived from LinkedIn's
+// messenger data: sent/received counts, follow-ups (re-pings with no reply),
+// read (seen) count, whether the other party replied, and whether it became a
+// real conversation (>2 messages, both sides). Unique per (user, conversation)
+// so re-syncing a thread updates its row.
+model MessageActivity {
+  id                    String    @id @default(uuid())
+  userId                String    @map("user_id")
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversationKey       String    @map("conversation_key")
+  // The other party (receiver).
+  participantLinkedinId String?   @map("participant_linkedin_id")
+  participantName       String?   @map("participant_name")
+  participantProfileUrl String?   @map("participant_profile_url")
+  // The app user's own LinkedIn identity (sender) for this conversation.
+  selfLinkedinId        String?   @map("self_linkedin_id")
+  selfName              String?   @map("self_name")
+  selfProfileUrl        String?   @map("self_profile_url")
+  sentCount             Int       @default(0) @map("sent_count")
+  receivedCount         Int       @default(0) @map("received_count")
+  followUpCount         Int       @default(0) @map("follow_up_count")
+  readCount             Int       @default(0) @map("read_count")
+  hasReply              Boolean   @default(false) @map("has_reply")
+  isConversation        Boolean   @default(false) @map("is_conversation")
+  firstMessageAt        DateTime? @map("first_message_at")
+  lastMessageAt         DateTime? @map("last_message_at")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+
+  @@unique([userId, conversationKey])
+  @@index([userId])
+  @@index([lastMessageAt])
+  @@index([userId, lastMessageAt])
+  @@index([selfLinkedinId])
+  @@map("message_activity")
+}
+
+// Hashed, rotating refresh tokens for user sessions (7-day TTL).
+// Only the SHA-256 hash of the opaque token is stored, so a DB leak
+// exposes no usable tokens. Rotation + reuse detection guard against theft.
+model RefreshToken {
+  id        String    @id @default(uuid())
+  tokenHash String    @unique @map("token_hash")
+  userId    String    @map("user_id")
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime  @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@map("refresh_tokens")
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// Short-lived, single-use 6-digit password-reset codes (OTP).
+// Stored as a SHA-256 hash, attempt-limited, and tied to a user.
+model PasswordResetCode {
+  id        String    @id @default(uuid())
+  codeHash  String    @map("code_hash")
+  userId    String    @map("user_id")
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  attempts  Int       @default(0)
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@map("password_reset_codes")
+  @@index([userId])
 }
 
 // OAuth state for secure authorization flow (CSRF protection)

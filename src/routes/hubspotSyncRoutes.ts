@@ -1,11 +1,12 @@
 import { Router } from "express";
 import { userAwareLimiter } from "../middlewares/rateLimiter";
-import { body, query } from "express-validator";
+import { body, query, param } from "express-validator";
 import { authenticate } from "../middlewares/auth";
 import { upsertMessages } from "../controllers/hubspotSyncController";
 import {
   createNote,
   getNotes,
+  getAllNotesByOwner,
   deleteNote,
   updateNote,
 } from "../controllers/hubspotSyncController";
@@ -16,19 +17,26 @@ import {
   updateTask,
   deleteTask,
 } from "../controllers/taskController";
+import { getAllTasksByOwner } from "../controllers/hubspotSyncController";
 import {
   syncLead,
   checkProfile,
   getPropertyOptions,
   updateContact,
+  getContactsByOwner,
+  getAllContacts,
 } from "../controllers/hubspotSyncController";
 
 const router = Router();
+
+// GET /api/hubspot/tasks/all — all tasks for current owner's contacts
+router.get("/tasks/all", authenticate, userAwareLimiter, getAllTasksByOwner);
 
 // GET /api/hubspot/tasks - Get all tasks for a contact
 router.get(
   "/tasks",
   authenticate,
+  userAwareLimiter,
   [
     query("contactId").trim().notEmpty().withMessage("contactId is required"),
     validate,
@@ -66,6 +74,7 @@ router.patch(
   authenticate,
   userAwareLimiter,
   [
+    param("taskId").matches(/^\d+$/).withMessage("taskId must be numeric"),
     body("taskName").trim().notEmpty().withMessage("taskName is required"),
     body("priority")
       .isIn(["None", "Low", "Medium", "High"])
@@ -87,15 +96,26 @@ router.patch(
 );
 
 // DELETE /api/hubspot/tasks/:taskId - Delete a task
-router.delete("/tasks/:taskId", authenticate, deleteTask);
+router.delete(
+  "/tasks/:taskId",
+  authenticate,
+  userAwareLimiter,
+  [param("taskId").matches(/^\d+$/).withMessage("taskId must be numeric"), validate],
+  deleteTask,
+);
 
-// GET /api/hubspot/notes - Get all notes for a contact
+// GET /api/hubspot/notes/all - Get all notes for the authenticated user's contacts
+router.get("/notes/all", authenticate, userAwareLimiter, getAllNotesByOwner);
+
+// GET /api/hubspot/notes - Get paginated notes for a contact
 router.get(
   "/notes",
   authenticate,
   userAwareLimiter,
   [
     query("contactId").trim().notEmpty().withMessage("contactId is required"),
+    query("limit").optional().isInt({ min: 1, max: 50 }).withMessage("limit must be 1-50"),
+    query("after").optional().trim(),
     validate,
   ],
   getNotes,
@@ -107,6 +127,7 @@ router.patch(
   authenticate,
   userAwareLimiter,
   [
+    param("noteId").matches(/^\d+$/).withMessage("noteId must be numeric"),
     body("notes").trim().notEmpty().withMessage("notes is required"),
     body("noteTitle").optional().trim().isLength({ max: 200 }),
     body("dealValue").optional().trim().isLength({ max: 100 }),
@@ -117,7 +138,13 @@ router.patch(
 );
 
 // DELETE /api/hubspot/notes/:noteId - Delete a note
-router.delete("/notes/:noteId", authenticate, deleteNote);
+router.delete(
+  "/notes/:noteId",
+  authenticate,
+  userAwareLimiter,
+  [param("noteId").matches(/^\d+$/).withMessage("noteId must be numeric"), validate],
+  deleteNote,
+);
 
 // POST /api/hubspot/create-note - Create a new note
 router.post(
@@ -139,13 +166,16 @@ router.post(
 router.get(
   "/check-profile",
   authenticate,
+  userAwareLimiter,
   [
     query("username")
       .trim()
       .notEmpty()
       .withMessage("username is required")
       .isLength({ max: 100 })
-      .withMessage("username too long"),
+      .withMessage("username too long")
+      .matches(/^[a-zA-Z0-9\-_%]+$/)
+      .withMessage("username contains invalid characters"),
     validate,
   ],
   checkProfile,
@@ -199,13 +229,61 @@ router.post(
       .trim()
       .isURL()
       .withMessage("Invalid company URL"),
+    body("contact.headline").optional().trim().isLength({ max: 500 }).withMessage("headline too long"),
+    body("contact.selectedRole").optional().trim().isLength({ max: 200 }).withMessage("selectedRole too long"),
+    body("contact.selectedCompany").optional().trim().isLength({ max: 200 }).withMessage("selectedCompany too long"),
+    body("contact.connectedOn").optional().trim().isLength({ max: 100 }).withMessage("connectedOn too long"),
+    body("contact.experiences").optional().isArray({ max: 50 }).withMessage("experiences array too large"),
+    body("contact.experiences.*.role").optional().trim().isLength({ max: 200 }).withMessage("experience role too long"),
+    body("contact.experiences.*.companyLine").optional().trim().isLength({ max: 200 }).withMessage("experience companyLine too long"),
+    body("contact.experiences.*.dates").optional().trim().isLength({ max: 100 }).withMessage("experience dates too long"),
     validate,
   ],
   syncLead,
 );
 
+// GET /api/hubspot/contacts/all - Get all contacts (cached, for client-side search)
+router.get("/contacts/all", authenticate, userAwareLimiter, getAllContacts);
+
+// GET /api/hubspot/contacts - Get all contacts owned by the authenticated user
+// Query params: page, limit, search, sortBy, sortOrder
+router.get(
+  "/contacts",
+  authenticate,
+  [
+    query("page")
+      .optional()
+      .isInt({ min: 1 })
+      .withMessage("page must be a positive integer"),
+    query("limit")
+      .optional()
+      .isInt({ min: 1, max: 200 })
+      .withMessage("limit must be between 1 and 200"),
+    query("search")
+      .optional()
+      .trim()
+      .isLength({ max: 200 })
+      .withMessage("search too long"),
+    query("sortBy")
+      .optional()
+      .isIn(["firstname", "lastname", "email", "createdate", "lastmodifieddate"])
+      .withMessage("sortBy must be one of: firstname, lastname, email, createdate, lastmodifieddate"),
+    query("sortOrder")
+      .optional()
+      .isIn(["ascending", "descending", "ASCENDING", "DESCENDING"])
+      .withMessage("sortOrder must be ascending or descending"),
+    validate,
+  ],
+  getContactsByOwner,
+);
+
 // GET /api/hubspot/property-options - Get HubSpot property options
-router.get("/property-options", authenticate, getPropertyOptions);
+router.get(
+  "/property-options",
+  authenticate,
+  userAwareLimiter,
+  getPropertyOptions,
+);
 
 // PATCH /api/hubspot/update-contact - Update HubSpot contact
 router.patch(
@@ -218,7 +296,9 @@ router.patch(
       .notEmpty()
       .withMessage("username is required")
       .isLength({ max: 100 })
-      .withMessage("username too long"),
+      .withMessage("username too long")
+      .matches(/^[a-zA-Z0-9\-_%]+$/)
+      .withMessage("username contains invalid characters"),
     body("email")
       .optional({ values: "falsy" })
       .trim()
@@ -260,8 +340,8 @@ router.post(
       .notEmpty()
       .withMessage("conversationKey is required"),
     body("messages")
-      .isArray({ min: 1 })
-      .withMessage("messages array is required and must not be empty"),
+      .isArray({ min: 1, max: 500 })
+      .withMessage("messages array is required, must not be empty, and cannot exceed 500 items"),
     body("messages.*.text")
       .trim()
       .notEmpty()

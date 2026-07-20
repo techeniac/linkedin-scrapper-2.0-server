@@ -2,7 +2,20 @@ import prisma from "../config/prisma";
 
 export class UserRepository {
   static findById(id: string) {
-    return prisma.user.findUnique({ where: { id } });
+    return prisma.user.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        hubspotAccessToken: true,
+        hubspotRefreshToken: true,
+        hubspotOwnerId: true,
+        hubspotTokenExpiresAt: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
   }
 
   static async updateHubSpotTokens(

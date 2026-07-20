@@ -120,19 +120,6 @@ export function parseHubSpotDateTime(timestamp?: string, timeZone = "UTC"): {
   }
 }
 
-// dead code: combineDateTimeToTimestamp — never called, preserved as-is
-export function combineDateTimeToTimestamp(
-  date?: string,
-  time?: string,
-): string | null {
-  if (!date) return null;
-  const timeStr = time || "00:00";
-  try {
-    return new Date(`${date}T${timeStr}:00.000Z`).getTime().toString();
-  } catch {
-    return null;
-  }
-}
 
 export function generateThreadId(conversationKey: string): string {
   // refactored: was require("crypto") inside method body

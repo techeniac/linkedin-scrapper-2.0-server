@@ -2,6 +2,7 @@ import axios from "axios";
 import crypto from "crypto";
 import { UserRepository } from "../repositories/userRepository";
 import prisma from "../config/prisma";
+import logger from "../utils/logger";
 import {
   HUBSPOT_CLIENT_ID,
   HUBSPOT_CLIENT_SECRET,
@@ -66,43 +67,51 @@ export class HubSpotOAuthService {
 
   // Exchange authorization code for access and refresh tokens
   static async exchangeCodeForTokens(code: string) {
-    const response = await axios.post(
-      "https://api.hubapi.com/oauth/v1/token",
-      new URLSearchParams({
-        grant_type: "authorization_code",
-        client_id: HUBSPOT_CLIENT_ID,
-        client_secret: HUBSPOT_CLIENT_SECRET,
-        redirect_uri: HUBSPOT_REDIRECT_URI,
-        code,
-      }),
-      { headers: { "Content-Type": "application/x-www-form-urlencoded" } },
-    );
-
-    return {
-      accessToken: response.data.access_token,
-      refreshToken: response.data.refresh_token,
-      expiresIn: response.data.expires_in,
-    };
+    try {
+      const response = await axios.post(
+        "https://api.hubapi.com/oauth/v1/token",
+        new URLSearchParams({
+          grant_type: "authorization_code",
+          client_id: HUBSPOT_CLIENT_ID,
+          client_secret: HUBSPOT_CLIENT_SECRET,
+          redirect_uri: HUBSPOT_REDIRECT_URI,
+          code,
+        }),
+        { headers: { "Content-Type": "application/x-www-form-urlencoded" } },
+      );
+      return {
+        accessToken: response.data.access_token,
+        refreshToken: response.data.refresh_token,
+        expiresIn: response.data.expires_in,
+      };
+    } catch (error: any) {
+      logger.error(`[HubSpot OAuth] Token exchange failed: ${error.response?.status ?? error.message}`);
+      throw new Error("Failed to exchange HubSpot authorization code. Please try connecting again.");
+    }
   }
 
   // Refresh expired access token using refresh token
   static async refreshAccessToken(refreshToken: string) {
-    const response = await axios.post(
-      "https://api.hubapi.com/oauth/v1/token",
-      new URLSearchParams({
-        grant_type: "refresh_token",
-        client_id: HUBSPOT_CLIENT_ID,
-        client_secret: HUBSPOT_CLIENT_SECRET,
-        refresh_token: refreshToken,
-      }),
-      { headers: { "Content-Type": "application/x-www-form-urlencoded" } },
-    );
-
-    return {
-      accessToken: response.data.access_token,
-      refreshToken: response.data.refresh_token,
-      expiresIn: response.data.expires_in,
-    };
+    try {
+      const response = await axios.post(
+        "https://api.hubapi.com/oauth/v1/token",
+        new URLSearchParams({
+          grant_type: "refresh_token",
+          client_id: HUBSPOT_CLIENT_ID,
+          client_secret: HUBSPOT_CLIENT_SECRET,
+          refresh_token: refreshToken,
+        }),
+        { headers: { "Content-Type": "application/x-www-form-urlencoded" } },
+      );
+      return {
+        accessToken: response.data.access_token,
+        refreshToken: response.data.refresh_token,
+        expiresIn: response.data.expires_in,
+      };
+    } catch (error: any) {
+      logger.error(`[HubSpot OAuth] Token refresh failed: ${error.response?.status ?? error.message}`);
+      throw new Error("Failed to refresh HubSpot access token. Please reconnect HubSpot.");
+    }
   }
 
   // Get HubSpot owner ID by email address
@@ -120,8 +129,8 @@ export class HubSpotOAuthService {
       );
 
       return owner?.id || null;
-    } catch (error) {
-      console.error("Error fetching HubSpot owners:", error);
+    } catch (error: any) {
+      logger.error(`[HubSpot OAuth] Failed to fetch owners: ${error.response?.status ?? error.message}`);
       return null;
     }
   }

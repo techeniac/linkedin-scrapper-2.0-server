@@ -2,6 +2,7 @@ import axios from "axios";
 import { CompanyData } from "../types";
 import logger from "../utils/logger";
 import { extractCompanySegment, normalizeWebsite } from "./hubspotHelpers";
+import { AppError } from "../errors/AppError";
 
 export class HubSpotCompanyService {
   constructor(
@@ -70,18 +71,13 @@ export class HubSpotCompanyService {
         `[HubSpot] Response: ${JSON.stringify(error.response?.data)}`,
       );
 
-      if (error.response?.status === 400) {
-        const errorData = error.response.data;
-        throw new Error(
-          `HubSpot API Error (400): ${errorData?.message || JSON.stringify(errorData)}`,
-        );
-      } else if (error.response?.status === 401) {
-        throw new Error("HubSpot authentication failed. Please reconnect.");
-      } else if (error.response?.status === 403) {
-        throw new Error("HubSpot permission denied. Check OAuth scopes.");
-      }
-
-      throw new Error(`Company sync failed: ${error.message}`);
+      const status = error.response?.status;
+      const msg = error.response?.data?.message || error.message;
+      if (status === 400) throw new AppError(`HubSpot API Error (400): ${msg}`, 400);
+      if (status === 401) throw new AppError("HubSpot authentication failed. Please reconnect.", 401);
+      if (status === 403) throw new AppError("HubSpot permission denied. Check OAuth scopes.", 403);
+      if (status === 429) throw new AppError("HubSpot rate limit reached. Please try again later.", 429);
+      throw new AppError(`Company sync failed: ${msg}`, 502);
     }
   }
 }
