@@ -6,4 +6,5 @@ logs/
 coverage/
 dist/
 build/
-.vscode
+server/
+HubLead_Readme.md

@@ -1,19 +1,19 @@
 import { Request, Response, NextFunction } from "express";
 import { validationResult } from "express-validator";
-import { ValidationError } from "../errors/AppError";
+import { errorResponse } from "../utils/apiResponse";
 
 // Middleware to validate request using express-validator
 export const validate = (
   req: Request,
-  _res: Response,
+  res: Response,
   next: NextFunction,
 ): void => {
   const errors = validationResult(req);
 
+  // Return validation errors if any
   if (!errors.isEmpty()) {
-    const err = new ValidationError("Validation failed");
-    (err as any).errors = errors.array();
-    return next(err);
+    errorResponse(res, "Validation failed", 400, errors.array());
+    return;
   }
 
   next();

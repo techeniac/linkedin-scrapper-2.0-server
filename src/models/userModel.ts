@@ -65,16 +65,4 @@ export class UserModel {
     return bcrypt.compare(plainPassword, hashedPassword);
   }
 
-  // Update a user's password (hashes the new plaintext password)
-  static async updatePassword(
-    userId: string,
-    newPassword: string,
-  ): Promise<void> {
-    const hashedPassword = await bcrypt.hash(newPassword, 10);
-    await prisma.user.update({
-      where: { id: userId },
-      data: { password: hashedPassword },
-    });
-  }
-
 }

@@ -13,42 +13,13 @@ if (!process.env.JWT_SECRET) {
   throw new Error("JWT_SECRET is required in environment variables");
 }
 export const JWT_SECRET = process.env.JWT_SECRET;
-// Kept as a fallback; access tokens now use ACCESS_TOKEN_TTL.
 export const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "7d";
-
-// Access token: short-lived JWT. Refresh token: long-lived opaque token.
-export const ACCESS_TOKEN_TTL = process.env.ACCESS_TOKEN_TTL || "15m";
-export const REFRESH_TOKEN_TTL_DAYS = parseInt(
-  process.env.REFRESH_TOKEN_TTL_DAYS || "7",
-);
-
-// Password-reset OTP configuration.
-export const RESET_CODE_TTL_MINUTES = parseInt(
-  process.env.RESET_CODE_TTL_MINUTES || "10",
-);
-export const RESET_CODE_MAX_ATTEMPTS = parseInt(
-  process.env.RESET_CODE_MAX_ATTEMPTS || "5",
-);
-
-// SMTP configuration for transactional email (password-reset codes).
-export const SMTP_HOST = process.env.SMTP_HOST || "";
-export const SMTP_PORT = parseInt(process.env.SMTP_PORT || "587");
-export const SMTP_USER = process.env.SMTP_USER || "";
-export const SMTP_PASS = process.env.SMTP_PASS || "";
-export const SMTP_FROM =
-  process.env.SMTP_FROM || "HubLead <no-reply@hublead.local>";
 
 // Rate limiting configuration (window in minutes, max requests per window)
 export const RATE_LIMIT_WINDOW = parseInt(
   process.env.RATE_LIMIT_WINDOW || "15",
 );
 export const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX || "100");
-
-// Shared store for rate limiting. Set to an Upstash (or any) Redis connection
-// string (e.g. rediss://default:<token>@<host>:<port>) so limits are enforced
-// across all serverless instances. When empty, limiters fall back to an
-// in-memory store that is per-instance only.
-export const REDIS_URL = process.env.REDIS_URL || "";
 
 // HubSpot OAuth configuration
 export const HUBSPOT_CLIENT_ID = process.env.HUBSPOT_CLIENT_ID || "";
