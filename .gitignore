@@ -1,9 +1,10 @@
 node_modules/
-.env
 logs/
 *.log
 .DS_Store
 coverage/
 dist/
 build/
-.vscode
+server/
+HubLead_Readme.md
+config.bat

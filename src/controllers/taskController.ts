@@ -1,7 +1,6 @@
 import { Response, NextFunction } from "express";
 import { HubSpotContextService } from "../services/hubspotContextService";
 import { successResponse } from "../utils/apiResponse";
-import { ForbiddenError } from "../errors/AppError";
 import { AuthRequest, CreateTaskRequest, UpdateTaskRequest } from "../types";
 
 export const getTasks = async (
@@ -10,15 +9,10 @@ export const getTasks = async (
   next: NextFunction,
 ): Promise<void> => {
   try {
-    const { contactId, userTimeZone, after } = req.query;
-    const limit = Math.min(50, parseInt(req.query.limit as string) || 20);
+    const { contactId, userTimeZone } = req.query;
     const { syncService } = await HubSpotContextService.getContext(req.user!.id);
-    const result = await syncService.getTasksByContactPaginated(
-      contactId as string,
-      { limit, after: after as string | undefined },
-      userTimeZone as string | undefined,
-    );
-    successResponse(res, result, "Tasks fetched successfully");
+    const tasks = await syncService.getTasksByContact(contactId as string, userTimeZone as string | undefined);
+    successResponse(res, tasks, "Tasks fetched successfully");
   } catch (error) {
     next(error);
   }
@@ -47,13 +41,7 @@ export const updateTask = async (
   try {
     const { taskId } = req.params;
     const taskData: UpdateTaskRequest = req.body;
-    const { ownerId, syncService } = await HubSpotContextService.getContext(req.user!.id);
-
-    const taskOwnerId = await syncService.getTaskOwner(taskId);
-    if (ownerId && taskOwnerId && taskOwnerId !== ownerId) {
-      throw new ForbiddenError();
-    }
-
+    const { syncService } = await HubSpotContextService.getContext(req.user!.id);
     const task = await syncService.updateTask(taskId, taskData);
     successResponse(res, task, "Task updated successfully");
   } catch (error) {
@@ -68,13 +56,7 @@ export const deleteTask = async (
 ): Promise<void> => {
   try {
     const { taskId } = req.params;
-    const { ownerId, syncService } = await HubSpotContextService.getContext(req.user!.id);
-
-    const taskOwnerId = await syncService.getTaskOwner(taskId);
-    if (ownerId && taskOwnerId && taskOwnerId !== ownerId) {
-      throw new ForbiddenError();
-    }
-
+    const { syncService } = await HubSpotContextService.getContext(req.user!.id);
     await syncService.deleteTask(taskId);
     successResponse(res, null, "Task deleted successfully");
   } catch (error) {
