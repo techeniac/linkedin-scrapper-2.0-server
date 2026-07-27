@@ -25,7 +25,7 @@ const errorHandler = (
     success: false,
     message,
     timestamp: new Date().toISOString(),
-    ...((err as any).errors && { errors: (err as any).errors }),
+    path: req.url,
   });
 };
 

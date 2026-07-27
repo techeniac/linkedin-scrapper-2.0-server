@@ -12,6 +12,8 @@ export interface ApiResponse<T = any> {
 export interface HealthData {
   status: string;
   timestamp: string;
+  uptime: number;
+  environment: string;
 }
 
 // User entity with optional HubSpot OAuth fields
@@ -47,27 +49,9 @@ export interface RegisterRequest {
   name?: string;
 }
 
-// Authentication response with user (incl. access token) and refresh token
+// Authentication response with user and token
 export interface AuthResponse {
   user: User;
-  refreshToken?: string;
-}
-
-// Refresh access token request payload
-export interface RefreshRequest {
-  refreshToken: string;
-}
-
-// Forgot-password request payload
-export interface ForgotPasswordRequest {
-  email: string;
-}
-
-// Reset-password request payload (OTP flow)
-export interface ResetPasswordRequest {
-  email: string;
-  code: string;
-  password: string;
 }
 
 export * from "./hubspot.types";
