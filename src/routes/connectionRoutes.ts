@@ -47,7 +47,9 @@ router.post(
       .notEmpty()
       .withMessage("targetLinkedinId is required"),
     body("status")
-      .isIn(["PENDING", "ACCEPTED", "NOT_ACCEPTED", "WITHDRAWN"])
+      // NOT_ACCEPTED still accepted so an older extension build doesn't start
+      // failing validation; it is no longer written by anything.
+      .isIn(["PENDING", "ACCEPTED", "NOT_ACCEPTED", "WITHDRAWN", "EXPIRED"])
       .withMessage("status must be a valid ConnectionRequestStatus"),
     validate,
   ],
@@ -66,6 +68,10 @@ router.post(
     body("connected.*.name").optional().isString(),
     body("connected.*.connectedAt").optional().isString(),
     body("sentInvitationsFetched").isBoolean(),
+    // True only when the Sent-list walk reached the end. Optional so older
+    // extension builds keep working — treated as false (partial) when absent,
+    // which blocks any EXPIRED resolution.
+    body("sentListComplete").optional().isBoolean(),
     body("coverageFloor").optional().isString(),
     body("actorLinkedinId").optional().isString(),
     validate,

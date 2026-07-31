@@ -50,6 +50,11 @@ export const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX || "100");
 // in-memory store that is per-instance only.
 export const REDIS_URL = process.env.REDIS_URL || "";
 
+// Optional shared secret for the unauthenticated /api/public/* endpoints.
+// Leave EMPTY to keep them fully open (current behaviour). Set it to require
+// `x-api-key: <key>` (or `Authorization: Bearer <key>`) on those routes.
+export const PUBLIC_API_KEY = process.env.PUBLIC_API_KEY || "";
+
 // HubSpot OAuth configuration
 export const HUBSPOT_CLIENT_ID = process.env.HUBSPOT_CLIENT_ID || "";
 export const HUBSPOT_CLIENT_SECRET = process.env.HUBSPOT_CLIENT_SECRET || "";

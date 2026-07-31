@@ -24,25 +24,55 @@ model User {
   refreshTokens      RefreshToken[]
   passwordResetCodes PasswordResetCode[]
   connectionRequests ConnectionRequest[]
+  connectionEvents   ConnectionRequestEvent[]
   messageActivity    MessageActivity[]
 
   @@map("users")
 }
 
 // Lifecycle status of a LinkedIn connection request we sent on a user's behalf.
-// LinkedIn only reliably exposes "sent" + "pending"; ACCEPTED is inferred when
-// the target later resolves to a 1st-degree connection, WITHDRAWN when the user
-// retracts the invite, and NOT_ACCEPTED covers declined / ignored / expired.
+//
+// The Sent-invitations list LinkedIn exposes to us contains ONLY outstanding
+// invitations, and reports every one of them as "Pending" — resolved ones simply
+// disappear. So the statuses are derived by elimination:
+//   PENDING   : present in the Sent list
+//   ACCEPTED  : absent, and the target is now a 1st-degree connection
+//   WITHDRAWN : absent, and we intercepted the user retracting it
+//   EXPIRED   : absent, and neither of the above
+//
+// EXPIRED therefore also absorbs declines. LinkedIn's own data model does
+// distinguish REJECTED from EXPIRED, but only through the partner-gated
+// /v2/invitations API; through the endpoint we can reach, a decline and an
+// expiry are indistinguishable (both just vanish, with no notification).
+// LinkedIn expires invitations after ~6 months, confirmed both by its help docs
+// and by observation — an account with ~1 year of activity retains nothing older.
 enum ConnectionRequestStatus {
   PENDING
   ACCEPTED
+  // DEPRECATED: never written. Superseded by EXPIRED. Kept so existing rows
+  // (if any) and historical events remain readable.
   NOT_ACCEPTED
   WITHDRAWN
+  EXPIRED
 }
 
-// One row per connection request a user sent. "Sent" is the total row count;
-// the four statuses partition those rows. Unique per (user, target) so a
-// re-send updates the existing row instead of duplicating it.
+// How we learned about a status transition — recorded on every event so a
+// surprising number can be traced back to the mechanism that produced it.
+enum ConnectionEventSource {
+  INTERCEPT // observed the user's own action in the browser (send / withdraw)
+  RECONCILE // derived by comparing our rows against a LinkedIn snapshot
+  BACKFILL  // seeded from LinkedIn's Sent list for invitations predating tracking
+}
+
+// CURRENT STATE of each connection request, one row per (user, target).
+//
+// This table answers "what is true right now" — it is intentionally lossy:
+// a re-send re-opens the same row, overwriting the previous outcome. LinkedIn
+// permits re-inviting a contact once their invitation expires, so at any real
+// volume that overwrite WILL happen and would silently erase expiries.
+// Historical questions ("how many expired in March") must therefore be answered
+// from ConnectionRequestEvent, which is append-only. Snapshot questions
+// ("how many are pending right now") are answered from here.
 model ConnectionRequest {
   id               String                  @id @default(uuid())
   userId           String                  @map("user_id")
@@ -59,7 +89,17 @@ model ConnectionRequest {
   actorPublicIdentifier  String?           @map("actor_public_identifier")
   status           ConnectionRequestStatus @default(PENDING)
   sentAt           DateTime                @default(now()) @map("sent_at")
+  // True when sentAt was inferred from LinkedIn's relative "Sent 3 weeks ago"
+  // text during backfill rather than observed at send time. Such dates are
+  // accurate only to the granularity LinkedIn renders (days → weeks → months).
+  sentAtIsEstimate Boolean                 @default(false) @map("sent_at_is_estimate")
   resolvedAt       DateTime?               @map("resolved_at")
+  // First COMPLETE sent-list walk in which this row was pending but absent from
+  // LinkedIn's list. Offset pagination over a list that mutates mid-walk can
+  // skip an entry, and a skipped entry is indistinguishable from a resolved one
+  // — so absence must be confirmed by a second consecutive complete walk before
+  // we write a terminal status. Cleared if the invitation reappears.
+  absentSince      DateTime?               @map("absent_since")
   createdAt        DateTime                @default(now()) @map("created_at")
   updatedAt        DateTime                @updatedAt @map("updated_at")
 
@@ -69,7 +109,47 @@ model ConnectionRequest {
   @@index([sentAt])
   @@index([userId, sentAt])
   @@index([actorLinkedinId])
+  @@index([userId, status])
+  @@index([userId, actorLinkedinId, status])
   @@map("connection_requests")
+}
+
+// APPEND-ONLY history of connection-request status transitions.
+//
+// Never updated or deleted. One row per transition, including the initial send
+// and every re-send. This is what makes historical counts survive the
+// re-send-overwrites-the-row behaviour of ConnectionRequest above.
+model ConnectionRequestEvent {
+  id               String                   @id @default(uuid())
+  userId           String                   @map("user_id")
+  user             User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  targetLinkedinId String                   @map("target_linkedin_id")
+  // Snapshotted so a report row stays readable even if the current-state row is
+  // later re-opened and its target details change.
+  targetName       String?                  @map("target_name")
+  targetProfileUrl String?                  @map("target_profile_url")
+  actorLinkedinId  String?                  @map("actor_linkedin_id")
+  // null for the initial send (no prior state).
+  fromStatus       ConnectionRequestStatus? @map("from_status")
+  toStatus         ConnectionRequestStatus  @map("to_status")
+  // When the transition actually happened. Distinct from detectedAt because a
+  // periodic sync notices things long after they occur — bucketing a chart on
+  // detection time would show sync cadence rather than real activity.
+  occurredAt       DateTime                 @map("occurred_at")
+  // True when occurredAt is inferred rather than observed. Expiries are always
+  // estimated (LinkedIn never tells us the moment); sends and withdrawals are
+  // observed exactly; acceptances use LinkedIn's real connection date.
+  occurredAtIsEstimate Boolean              @default(false) @map("occurred_at_is_estimate")
+  detectedAt       DateTime                 @default(now()) @map("detected_at")
+  source           ConnectionEventSource
+  createdAt        DateTime                 @default(now()) @map("created_at")
+
+  @@index([userId, occurredAt])
+  @@index([actorLinkedinId, occurredAt])
+  @@index([toStatus, occurredAt])
+  @@index([userId, toStatus, occurredAt])
+  @@index([userId, targetLinkedinId])
+  @@map("connection_request_events")
 }
 
 // Per-user messaging metrics, one row per conversation. Derived from LinkedIn's

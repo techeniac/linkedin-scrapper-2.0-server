@@ -80,6 +80,7 @@ export const reconcileConnections = async (
       stillPendingIds,
       connected,
       sentInvitationsFetched,
+      sentListComplete,
       coverageFloor,
       actorLinkedinId,
     } = req.body as {
@@ -90,6 +91,7 @@ export const reconcileConnections = async (
         connectedAt?: string;
       }[];
       sentInvitationsFetched: boolean;
+      sentListComplete?: boolean;
       coverageFloor?: string;
       actorLinkedinId?: string;
     };
@@ -97,6 +99,9 @@ export const reconcileConnections = async (
       stillPendingIds,
       connected,
       sentInvitationsFetched,
+      // Absent means partial. An older extension that doesn't send this flag
+      // must never be able to resolve rows to EXPIRED.
+      sentListComplete: sentListComplete === true,
       coverageFloor,
       actorLinkedinId,
     });

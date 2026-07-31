@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import { ConnectionRequestStatus } from "@prisma/client";
 import { ConnectionService } from "../services/connectionService";
+import { ConnectionEventService } from "../services/connectionEventService";
 import { MessageActivityService } from "../services/messageActivityService";
 import {
   getConnectedOwners,
@@ -164,16 +165,48 @@ export const getSummary = async (
     const userId = pickOwner(req.query.userId, ownerIds);
     const linkedinId = toStr(req.query.linkedinId);
 
-    const [connectionsSeries, messagesSeries, linkedinAccounts] =
-      await Promise.all([
-        ConnectionService.getSeries(userId, from, to, ownerIds, linkedinId, granularity),
-        MessageActivityService.getSeries(userId, from, to, ownerIds, linkedinId, granularity),
-        getLinkedinAccounts(ownerIds),
-      ]);
+    const [
+      connectionsSeries,
+      connectionsActivitySeries,
+      connectionsTotals,
+      messagesSeries,
+      linkedinAccounts,
+    ] = await Promise.all([
+      // COHORT: of requests sent in each bucket, their status now.
+      ConnectionService.getSeries(userId, from, to, ownerIds, linkedinId, granularity),
+      // ACTIVITY: what actually happened in each bucket, from the append-only
+      // event log. This is the series the Connection Requests report wants —
+      // it counts every send (including re-sends) and every expiry at the time
+      // it occurred, which the cohort view above cannot do.
+      ConnectionEventService.getSeries(from, to, {
+        userId,
+        restrictUserIds: ownerIds,
+        actorLinkedinId: linkedinId,
+        granularity,
+      }),
+      ConnectionEventService.getTotals(from, to, {
+        userId,
+        restrictUserIds: ownerIds,
+        actorLinkedinId: linkedinId,
+      }),
+      MessageActivityService.getSeries(userId, from, to, ownerIds, linkedinId, granularity),
+      getLinkedinAccounts(ownerIds),
+    ]);
+
+    // Pending is a SNAPSHOT, not a time series — "how many are outstanding
+    // right now" — so it comes from current state rather than the event log.
+    const pendingNow = await ConnectionService.getStats(userId, ownerIds);
 
     successResponse(
       res,
-      { connectionsSeries, messagesSeries, users: owners, linkedinAccounts },
+      {
+        connectionsSeries,
+        connectionsActivitySeries,
+        connectionsTotals: { ...connectionsTotals, pending: pendingNow.pending },
+        messagesSeries,
+        users: owners,
+        linkedinAccounts,
+      },
       "Summary retrieved",
     );
   } catch (error) {
