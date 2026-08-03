@@ -26,19 +26,37 @@ export const recordMessageActivity = async (
     };
     const input = rest as MessageActivityInput;
     await MessageActivityService.upsert(userId, input);
+
+    // Isolated from the upsert above: the extension's tracker updates its
+    // change-detection signature BEFORE this network call resolves, so if
+    // this whole request failed over an events-only error, the client would
+    // never retry — that batch's events would be silently lost forever, even
+    // though the (more important) aggregate metrics above were saved fine.
+    // A failure here degrades report accuracy for one batch, not correctness.
+    let eventsRecorded = 0;
     if (events?.length) {
-      await MessageEventService.recordEvents(userId, {
-        conversationKey: input.conversationKey,
-        participantLinkedinId: input.participantLinkedinId,
-        selfLinkedinId: input.selfLinkedinId,
-        events,
-      });
+      try {
+        await MessageEventService.recordEvents(userId, {
+          conversationKey: input.conversationKey,
+          participantLinkedinId: input.participantLinkedinId,
+          selfLinkedinId: input.selfLinkedinId,
+          events,
+        });
+        eventsRecorded = events.length;
+      } catch (eventError) {
+        logger.error("[MSG][api] recordEvents failed (non-fatal)", {
+          userId,
+          conversationKey: input.conversationKey,
+          error: eventError instanceof Error ? eventError.message : eventError,
+        });
+      }
     }
+
     logger.info("[MSG][api] POST /messages/activity", {
       userId,
       conversationKey: input.conversationKey,
       sent: input.sentCount,
-      events: events?.length ?? 0,
+      events: eventsRecorded,
     });
     successResponse(res, null, "Message activity recorded", 201);
   } catch (error: any) {

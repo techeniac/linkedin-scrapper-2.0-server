@@ -40,6 +40,8 @@ router.post(
     body("events.*.isFirstTouch").optional().isBoolean(),
     body("events.*.isFollowUp").optional().isBoolean(),
     body("events.*.isFirstReply").optional().isBoolean(),
+    body("events.*.respondsToAt").optional({ nullable: true }).isString(),
+    body("events.*.selfTimeZone").optional({ nullable: true }).isString(),
     validate,
   ],
   recordMessageActivity,

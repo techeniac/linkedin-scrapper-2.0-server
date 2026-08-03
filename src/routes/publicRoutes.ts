@@ -4,6 +4,8 @@ import {
   getFilters,
   getConnections,
   getMessages,
+  getLateMessages,
+  getMissedFollowUps,
 } from "../controllers/publicController";
 import { requirePublicApiKey } from "../middlewares/publicApiKey";
 
@@ -24,5 +26,7 @@ router.get("/summary", getSummary);
 router.get("/filters", getFilters);
 router.get("/connections", getConnections);
 router.get("/messages", getMessages);
+router.get("/late-messages", getLateMessages);
+router.get("/missed-followups", getMissedFollowUps);
 
 export default router;

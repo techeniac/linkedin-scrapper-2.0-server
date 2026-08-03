@@ -29,9 +29,15 @@ import prisma from "../config/prisma";
 // help documentation, and observation — an account with ~1 year of continuous
 // invitations retains nothing older than 6 months in the Sent list. Configurable
 // because LinkedIn has changed this policy before.
-export const INVITE_EXPIRY_MONTHS = Number(
-  process.env.LINKEDIN_INVITE_EXPIRY_MONTHS || "6",
-);
+//
+// A misconfigured env var (non-numeric, out of range) falls back to the
+// default rather than propagating NaN into estimateExpiryDate — an Invalid
+// Date written to resolvedAt would fail the DB write for that reconcile pass.
+const invitExpiryMonthsEnv = Number(process.env.LINKEDIN_INVITE_EXPIRY_MONTHS);
+export const INVITE_EXPIRY_MONTHS =
+  Number.isFinite(invitExpiryMonthsEnv) && invitExpiryMonthsEnv > 0 && invitExpiryMonthsEnv <= 60
+    ? invitExpiryMonthsEnv
+    : 6;
 
 export interface TransitionInput {
   userId: string;

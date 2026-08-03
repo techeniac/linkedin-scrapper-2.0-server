@@ -4,6 +4,8 @@ import { ConnectionService } from "../services/connectionService";
 import { ConnectionEventService } from "../services/connectionEventService";
 import { MessageActivityService } from "../services/messageActivityService";
 import { MessageEventService } from "../services/messageEventService";
+import { LateMessageService } from "../services/lateMessageService";
+import { MissedFollowUpService } from "../services/missedFollowUpService";
 import {
   getConnectedOwners,
   getConnectedOwnerIds,
@@ -172,6 +174,10 @@ export const getSummary = async (
       connectionsTotals,
       messagesSeries,
       messagesTotals,
+      lateSeries,
+      lateTotals,
+      missedFollowUpSeries,
+      missedFollowUpNow,
       linkedinAccounts,
     ] = await Promise.all([
       // COHORT: of requests sent in each bucket, their status now.
@@ -206,6 +212,33 @@ export const getSummary = async (
         restrictUserIds: ownerIds,
         selfLinkedinId: linkedinId,
       }),
+      // Late Messages report: SENT messages that answered something later
+      // than the deadline (see lateMessageService.ts for the quiet-hours rule).
+      LateMessageService.getSeries(from, to, {
+        userId,
+        restrictUserIds: ownerIds,
+        selfLinkedinId: linkedinId,
+        granularity,
+      }),
+      LateMessageService.getTotals(from, to, {
+        userId,
+        restrictUserIds: ownerIds,
+        selfLinkedinId: linkedinId,
+      }),
+      // Missed Follow-Up report: STABLE per-day crossing counts (backlog +
+      // resolved-late, unioned — see missedFollowUpService.ts), unlike
+      // getCurrentCount below which is intentionally a live snapshot.
+      MissedFollowUpService.getSeries(
+        from,
+        to,
+        { userId, restrictUserIds: ownerIds, selfLinkedinId: linkedinId },
+        now,
+      ),
+      // Unbounded live count, mirroring connectionsTotals.pending.
+      MissedFollowUpService.getCurrentCount(
+        { userId, restrictUserIds: ownerIds, selfLinkedinId: linkedinId },
+        now,
+      ),
       getLinkedinAccounts(ownerIds),
     ]);
 
@@ -221,6 +254,10 @@ export const getSummary = async (
         connectionsTotals: { ...connectionsTotals, pending: pendingNow.pending },
         messagesSeries,
         messagesTotals,
+        lateSeries,
+        lateTotals,
+        missedFollowUpSeries,
+        missedFollowUpNow,
         users: owners,
         linkedinAccounts,
       },
@@ -339,6 +376,109 @@ export const getMessages = async (
       },
       "Messages retrieved",
     );
+  } catch (error) {
+    next(error);
+  }
+};
+
+// GET /api/public/late-messages — supporting table for the Late Messages
+// report: one row per conversation (deduped to its most recent late instance
+// in the window). Query: from?, to? (ISO, defaults to the same 30-day window
+// as /summary), userId?, linkedinId?.
+export const getLateMessages = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const now = new Date();
+    let to = toDate(req.query.to) ?? now;
+    let from = toDate(req.query.from) ?? new Date(to.getTime() - 30 * DAY_MS);
+    if (from > to) [from, to] = [to, from];
+    // Defensive cap: list() must fetch every matching row (lateness can only
+    // be judged after computing it, before pagination), unlike the other list
+    // endpoints which can page at the DB level. Same 90-day cap as /summary's
+    // day granularity.
+    if (to.getTime() - from.getTime() > RANGE_CAP_MS.day) {
+      from = new Date(to.getTime() - RANGE_CAP_MS.day);
+    }
+
+    const [ownerIds, nameMap] = await Promise.all([
+      getConnectedOwnerIds(),
+      getConnectedOwnerNameMap(),
+    ]);
+    const userId = pickOwner(req.query.userId, ownerIds);
+
+    const result = await LateMessageService.list({
+      page: toInt(req.query.page, 1),
+      limit: toInt(req.query.limit, 10),
+      userId,
+      userIds: userId ? undefined : ownerIds,
+      selfLinkedinId: toStr(req.query.linkedinId),
+      from,
+      to,
+    });
+
+    // Table columns: Name | LinkedIn URL | Sales Person | LinkedIn Profile.
+    const data = result.data.map((r) => ({
+      name: r.participantName,
+      linkedinUrl: r.participantProfileUrl,
+      user: { name: nameMap.get(r.userId) ?? null }, // Sales Person
+      linkedinProfile: r.selfName, // the rep's own LinkedIn account
+      occurredAt: r.occurredAt,
+      kind: r.kind,
+    }));
+
+    successResponse(res, { data, metadata: result.metadata }, "Late messages retrieved");
+  } catch (error) {
+    next(error);
+  }
+};
+
+// GET /api/public/missed-followups — supporting table for the Missed
+// Follow-Up report: one row per conversation, showing its current follow-up
+// status — still overdue (STILL_MISSING), or resolved but late
+// (RESOLVED_LATE) — so an admin can see the full history, not just the
+// current backlog. Not windowed by date: message_events is immutable, so
+// this answers the same regardless of when you ask. Query: userId?,
+// linkedinId?, page?, limit?.
+export const getMissedFollowUps = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const now = new Date();
+    const [ownerIds, nameMap] = await Promise.all([
+      getConnectedOwnerIds(),
+      getConnectedOwnerNameMap(),
+    ]);
+    const userId = pickOwner(req.query.userId, ownerIds);
+
+    const result = await MissedFollowUpService.listHistory({
+      page: toInt(req.query.page, 1),
+      limit: toInt(req.query.limit, 10),
+      userId,
+      userIds: userId ? undefined : ownerIds,
+      selfLinkedinId: toStr(req.query.linkedinId),
+      now,
+    });
+
+    // Table columns: Name | LinkedIn URL | Sales Person | LinkedIn Profile,
+    // plus Status | Missed Since | Follow-Up Sent | Days Late for the history.
+    const data = result.data.map((r) => ({
+      name: r.participantName,
+      linkedinUrl: r.participantProfileUrl,
+      user: { name: nameMap.get(r.userId) ?? null }, // Sales Person
+      linkedinProfile: r.selfName, // the rep's own LinkedIn account
+      status: r.status,
+      missedSince: r.missedSince,
+      deadline: r.deadline,
+      followUpSentAt: r.followUpSentAt,
+      daysLate: r.daysLate,
+    }));
+
+    successResponse(res, { data, metadata: result.metadata }, "Missed follow-ups retrieved");
   } catch (error) {
     next(error);
   }

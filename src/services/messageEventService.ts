@@ -21,6 +21,8 @@ export interface MessageEventInput {
   isFirstTouch?: boolean;
   isFollowUp?: boolean;
   isFirstReply?: boolean;
+  respondsToAt?: string; // ISO or epoch-ms string; absent for the first message
+  selfTimeZone?: string; // IANA zone, e.g. "Asia/Kolkata"
 }
 
 export interface RecordEventsInput {
@@ -60,6 +62,8 @@ export class MessageEventService {
           isFirstTouch: !!e.isFirstTouch,
           isFollowUp: !!e.isFollowUp,
           isFirstReply: !!e.isFirstReply,
+          respondsToAt: e.respondsToAt ? toDate(e.respondsToAt) : null,
+          selfTimeZone: e.selfTimeZone ?? null,
           participantLinkedinId: input.participantLinkedinId ?? null,
           selfLinkedinId: input.selfLinkedinId ?? null,
         };
