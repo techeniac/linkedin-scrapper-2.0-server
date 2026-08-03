@@ -3,6 +3,7 @@ import { ConnectionRequestStatus } from "@prisma/client";
 import { ConnectionService } from "../services/connectionService";
 import { ConnectionEventService } from "../services/connectionEventService";
 import { MessageActivityService } from "../services/messageActivityService";
+import { MessageEventService } from "../services/messageEventService";
 import {
   getConnectedOwners,
   getConnectedOwnerIds,
@@ -170,6 +171,7 @@ export const getSummary = async (
       connectionsActivitySeries,
       connectionsTotals,
       messagesSeries,
+      messagesTotals,
       linkedinAccounts,
     ] = await Promise.all([
       // COHORT: of requests sent in each bucket, their status now.
@@ -189,7 +191,21 @@ export const getSummary = async (
         restrictUserIds: ownerIds,
         actorLinkedinId: linkedinId,
       }),
-      MessageActivityService.getSeries(userId, from, to, ownerIds, linkedinId, granularity),
+      // EVENT LOG, not the conversation-aggregate table: each message is
+      // bucketed by when it actually happened, so a long-running conversation's
+      // history doesn't all land on the day of its most recent message.
+      MessageEventService.getSeries(from, to, {
+        userId,
+        restrictUserIds: ownerIds,
+        selfLinkedinId: linkedinId,
+        granularity,
+      }),
+      // Windowed totals for the report's KPI cards, mirroring connectionsTotals.
+      MessageEventService.getTotals(from, to, {
+        userId,
+        restrictUserIds: ownerIds,
+        selfLinkedinId: linkedinId,
+      }),
       getLinkedinAccounts(ownerIds),
     ]);
 
@@ -204,6 +220,7 @@ export const getSummary = async (
         connectionsActivitySeries,
         connectionsTotals: { ...connectionsTotals, pending: pendingNow.pending },
         messagesSeries,
+        messagesTotals,
         users: owners,
         linkedinAccounts,
       },

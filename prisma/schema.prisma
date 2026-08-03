@@ -26,6 +26,7 @@ model User {
   connectionRequests ConnectionRequest[]
   connectionEvents   ConnectionRequestEvent[]
   messageActivity    MessageActivity[]
+  messageEvents      MessageEvent[]
 
   @@map("users")
 }
@@ -187,6 +188,58 @@ model MessageActivity {
   @@index([userId, lastMessageAt])
   @@index([selfLinkedinId])
   @@map("message_activity")
+}
+
+enum MessageEventType {
+  SENT
+  RECEIVED
+}
+
+// APPEND-ONLY per-message history, one row per (user, conversation, message).
+//
+// WHY THIS EXISTS: MessageActivity above holds one row per conversation with
+// LIFETIME aggregate counts, keyed to the conversation's lastMessageAt. A
+// conversation can span months, so bucketing a chart by lastMessageAt dumps a
+// conversation's entire history onto whichever single day its most recent
+// message happened to land on — the same class of bug ConnectionRequestEvent
+// was built to fix for connection requests. This table stores each message as
+// its own event, at its own occurredAt, so a day/week/month series reflects
+// when activity actually happened.
+//
+// The extension derives these flags client-side (in deriveActivity, which has
+// the full ordered message list) and the backend just inserts them
+// idempotently — ON CONFLICT DO NOTHING keyed on messageId, since the same
+// thread gets re-fetched/re-derived on every page load and a message's
+// content never changes once delivered.
+model MessageEvent {
+  id              String           @id @default(uuid())
+  userId          String           @map("user_id")
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversationKey String           @map("conversation_key")
+  // Stable per-message id derived on the client: `${deliveredAt}:${senderId}`.
+  messageId       String           @map("message_id")
+  type            MessageEventType
+  occurredAt      DateTime         @map("occurred_at") // the message's own deliveredAt
+  // SENT only: this is the very first message WE ever sent in this
+  // conversation — the "fresh (first-touch)" metric the report wants. Exactly
+  // one true per conversation.
+  isFirstTouch    Boolean          @default(false) @map("is_first_touch")
+  // SENT only: immediately followed our own prior send with no reply from the
+  // other party in between (a re-ping).
+  isFollowUp      Boolean          @default(false) @map("is_follow_up")
+  // RECEIVED only: the first message the OTHER party ever sent in this
+  // conversation, and only after we had already sent something — i.e. the
+  // moment a first-touch got its reply.
+  isFirstReply    Boolean          @default(false) @map("is_first_reply")
+  participantLinkedinId String?    @map("participant_linkedin_id")
+  selfLinkedinId  String?          @map("self_linkedin_id")
+  createdAt       DateTime         @default(now()) @map("created_at")
+
+  @@unique([userId, conversationKey, messageId])
+  @@index([userId, occurredAt])
+  @@index([type, occurredAt])
+  @@index([userId, type, occurredAt])
+  @@map("message_events")
 }
 
 // Hashed, rotating refresh tokens for user sessions (7-day TTL).
