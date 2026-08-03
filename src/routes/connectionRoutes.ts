@@ -72,7 +72,12 @@ router.post(
     // extension builds keep working — treated as false (partial) when absent,
     // which blocks any EXPIRED resolution.
     body("sentListComplete").optional().isBoolean(),
-    body("coverageFloor").optional().isString(),
+    // { nullable: true }: the client sends coverageFloor: null on purpose when
+    // the connections list was FULLY fetched (see connectionSync.ts) — that's
+    // the success case, not an edge case. Without nullable:true, express-
+    // validator's optional() only skips undefined, not an explicit null, so
+    // this rejected every fully-covered sync with "Validation failed".
+    body("coverageFloor").optional({ nullable: true }).isString(),
     body("actorLinkedinId").optional().isString(),
     validate,
   ],
