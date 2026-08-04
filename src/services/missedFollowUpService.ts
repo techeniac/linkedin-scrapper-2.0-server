@@ -74,8 +74,22 @@ export class MissedFollowUpService {
    * message with no response since, and whose deadline has passed as of
    * `now`. Uses DISTINCT ON to get exactly the latest event per conversation
    * — see the composite index on (userId, conversationKey, occurredAt).
+   *
+   * Public (not just for missedFollowUpService's own use) so callers needing
+   * BOTH the backlog and a derived value (its count, or a chart series built
+   * from it) can fetch it ONCE and pass the same array to buildSeries below
+   * and/or read `.length` themselves — see publicController's getSummary,
+   * which previously called the equivalent of this query twice per request.
+   *
+   * TIEBREAK: `(type = 'RECEIVED') DESC` makes the "last event" choice
+   * deterministic on an exact-timestamp tie between a SENT and a RECEIVED
+   * event (millisecond-precision timestamps can coincide). Without a
+   * tiebreaker, DISTINCT ON's pick on a tie is unspecified by Postgres and
+   * could vary between runs. Ties resolve toward RECEIVED — i.e. toward NOT
+   * flagging a backlog item — since this is an inherently ambiguous instant
+   * with no way to know which side "really" came last.
    */
-  private static async getBacklog(opts: QueryOpts, now: Date): Promise<BacklogRow[]> {
+  static async getBacklog(opts: QueryOpts, now: Date): Promise<BacklogRow[]> {
     const ownerFilter = opts.userId
       ? Prisma.sql`AND user_id = ${opts.userId}`
       : opts.restrictUserIds
@@ -100,7 +114,7 @@ export class MissedFollowUpService {
         participant_linkedin_id, self_linkedin_id
       FROM message_events
       WHERE true ${ownerFilter} ${accountFilter}
-      ORDER BY user_id, conversation_key, occurred_at DESC
+      ORDER BY user_id, conversation_key, occurred_at DESC, (type = 'RECEIVED') DESC
     `;
 
     return lastEvents
@@ -114,6 +128,32 @@ export class MissedFollowUpService {
         selfLinkedinId: e.self_linkedin_id,
       }))
       .filter((r) => now.getTime() > r.deadline.getTime());
+  }
+
+  /**
+   * Pure aggregation over an already-fetched backlog + resolved-crossings
+   * pair — no DB access. Split out so a caller that already has both arrays
+   * (again, publicController's getSummary) can build the series without a
+   * second round of queries.
+   */
+  static buildSeries(
+    backlog: BacklogRow[],
+    resolvedCrossings: Array<{ respondsToAt: Date }>,
+    from: Date,
+    to: Date,
+  ): Array<{ date: string; count: number }> {
+    const buckets = new Map<string, number>();
+    const bump = (deadline: Date) => {
+      if (deadline < from || deadline > to) return;
+      const key = truncUTC(deadline);
+      buckets.set(key, (buckets.get(key) ?? 0) + 1);
+    };
+    for (const r of backlog) bump(r.deadline);
+    for (const r of resolvedCrossings) bump(computeFollowUpDeadline(r.respondsToAt));
+
+    return Array.from(buckets.entries())
+      .map(([date, count]) => ({ date, count }))
+      .sort((a, b) => a.date.localeCompare(b.date));
   }
 
   /**
@@ -145,19 +185,7 @@ export class MissedFollowUpService {
       this.getBacklog(opts, now),
       LateMessageService.getFollowUpDeadlineCrossings(from, to, opts),
     ]);
-
-    const buckets = new Map<string, number>();
-    const bump = (deadline: Date) => {
-      if (deadline < from || deadline > to) return;
-      const key = truncUTC(deadline);
-      buckets.set(key, (buckets.get(key) ?? 0) + 1);
-    };
-    for (const r of backlog) bump(r.deadline);
-    for (const r of resolvedCrossings) bump(computeFollowUpDeadline(r.respondsToAt));
-
-    return Array.from(buckets.entries())
-      .map(([date, count]) => ({ date, count }))
-      .sort((a, b) => a.date.localeCompare(b.date));
+    return this.buildSeries(backlog, resolvedCrossings, from, to);
   }
 
   /** The live backlog count, unbounded by date — for the report's KPI card. */
@@ -213,7 +241,7 @@ export class MissedFollowUpService {
 
     const [backlog, resolvedHistory] = await Promise.all([
       this.getBacklog(opts, params.now),
-      LateMessageService.getFollowUpHistory(opts, params.now),
+      LateMessageService.getFollowUpHistory(opts),
     ]);
 
     const byConversation = new Map<string, HistoryRow>();

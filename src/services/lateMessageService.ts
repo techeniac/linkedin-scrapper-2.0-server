@@ -1,6 +1,14 @@
 // src/services/lateMessageService.ts
 import prisma from "../config/prisma";
+import { Prisma } from "@prisma/client";
 import { resolveTimeZone, convertLocalTimeToUTC } from "./hubspotHelpers";
+import {
+  LATE_MSG_THRESHOLD_HOURS,
+  LATE_MSG_QUIET_START_HOUR,
+  LATE_MSG_QUIET_END_HOUR,
+  LATE_MSG_EDGE_MODE,
+  LATE_FOLLOWUP_THRESHOLD_DAYS,
+} from "../config/env";
 
 /**
  * Late Messages report: was a SENT message a reply/follow-up sent later than
@@ -40,24 +48,22 @@ import { resolveTimeZone, convertLocalTimeToUTC } from "./hubspotHelpers";
  * redeploy of the extension — the extension only reports facts (timestamps,
  * timezone, which message responded to which), this service holds the
  * judgment call.
+ *
+ * QUERY STRATEGY: LATE_REPLY needs the quiet-hours math above, which isn't
+ * reasonably expressible as a single SQL predicate, so those candidates are
+ * fetched and classified in JS. LATE_FOLLOW_UP has no such need — its
+ * deadline is a flat day-offset — so it is filtered ENTIRELY IN SQL
+ * (queryLateFollowUps below): only genuinely-late rows are ever transferred,
+ * rather than fetching every SENT-with-a-response row and discarding most of
+ * it in Node.
  */
 
-// A misconfigured env var (non-numeric, out of range) falls back to the
-// default rather than propagating NaN — an Invalid Date reaching Intl.
-// DateTimeFormat throws a RangeError, which would 500 every report request.
-const numEnv = (name: string, fallback: number, min: number, max: number): number => {
-  const n = Number(process.env[name]);
-  return Number.isFinite(n) && n >= min && n <= max ? n : fallback;
-};
-
-const THRESHOLD_HOURS = numEnv("LATE_MSG_THRESHOLD_HOURS", 3, 0, 24 * 30);
-const QUIET_START_HOUR = numEnv("LATE_MSG_QUIET_START_HOUR", 0, 0, 23);
-const QUIET_END_HOUR = numEnv("LATE_MSG_QUIET_END_HOUR", 7, 0, 23);
-const EDGE_MODE: "CAP_AT_QUIET_START" | "EXTEND_PAST_QUIET" =
-  process.env.LATE_MSG_EDGE_MODE === "EXTEND_PAST_QUIET"
-    ? "EXTEND_PAST_QUIET"
-    : "CAP_AT_QUIET_START";
-export const FOLLOWUP_THRESHOLD_DAYS = numEnv("LATE_FOLLOWUP_THRESHOLD_DAYS", 7, 1, 365);
+// Thresholds validated and centralized in config/env.ts, alongside every
+// other env-driven setting in this codebase.
+const THRESHOLD_HOURS = LATE_MSG_THRESHOLD_HOURS;
+const QUIET_START_HOUR = LATE_MSG_QUIET_START_HOUR;
+const QUIET_END_HOUR = LATE_MSG_QUIET_END_HOUR;
+const EDGE_MODE = LATE_MSG_EDGE_MODE;
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
@@ -114,9 +120,14 @@ export function computeReplyDeadline(respondsToAt: Date, timeZone?: string | nul
  * The deadline by which the NEXT follow-up after `lastSentAt` is due, or it's
  * late/missed. Flat FOLLOWUP_THRESHOLD_DAYS days, deliberately no quiet-hours
  * adjustment — a few hours don't matter against a multi-day cadence window.
+ *
+ * Kept in JS (not only in SQL) because missedFollowUpService needs the actual
+ * deadline VALUE per backlog row, not just a late/not-late verdict — but it is
+ * a plain additive offset, so the equivalent SQL predicate
+ * (`occurred_at + N days < now()`) is provably identical, no drift risk.
  */
 export function computeFollowUpDeadline(lastSentAt: Date): Date {
-  return new Date(lastSentAt.getTime() + FOLLOWUP_THRESHOLD_DAYS * DAY_MS);
+  return new Date(lastSentAt.getTime() + LATE_FOLLOWUP_THRESHOLD_DAYS * DAY_MS);
 }
 
 // UTC-bucketed date_trunc equivalent, matching how the other report series
@@ -159,12 +170,20 @@ interface QueryOpts {
   selfLinkedinId?: string;
 }
 
+// Which column (and window) bounds a follow-up-lateness scan. null = no
+// window at all (the Missed Follow-Up report's all-time history view).
+type FollowUpDateBound =
+  | { column: "occurred_at" | "responds_to_at"; from: Date; to: Date }
+  | null;
+
 export class LateMessageService {
   /**
-   * Every SENT message in the window that responded to something (i.e. isn't
-   * a conversation's very first message), classified as late or on-time.
+   * Reply lateness only — the one kind that needs the JS quiet-hours math
+   * above, since it isn't reasonably expressible as a single SQL predicate.
+   * Narrowed to isFollowUp=false so this never fetches rows queryLateFollowUps
+   * already owns.
    */
-  private static async getLateRows(
+  private static async getLateReplyRows(
     from: Date,
     to: Date,
     opts: QueryOpts,
@@ -172,6 +191,7 @@ export class LateMessageService {
     const candidates = await prisma.messageEvent.findMany({
       where: {
         type: "SENT",
+        isFollowUp: false,
         respondsToAt: { not: null },
         occurredAt: { gte: from, lte: to },
         ...(opts.userId
@@ -195,24 +215,91 @@ export class LateMessageService {
 
     return candidates
       .filter((c): c is CandidateRow & { respondsToAt: Date } => c.respondsToAt !== null)
-      .map((c) => ({ ...c, kind: c.isFollowUp ? "LATE_FOLLOW_UP" : "LATE_REPLY" } as const))
-      .filter((c) => {
-        const deadline =
-          c.kind === "LATE_FOLLOW_UP"
-            ? computeFollowUpDeadline(c.respondsToAt)
-            : computeReplyDeadline(c.respondsToAt, c.selfTimeZone);
-        return c.occurredAt.getTime() > deadline.getTime();
-      });
+      .map((c) => ({ ...c, kind: "LATE_REPLY" as const }))
+      .filter(
+        (c) => c.occurredAt.getTime() > computeReplyDeadline(c.respondsToAt, c.selfTimeZone).getTime(),
+      );
   }
 
-  /** Per-bucket late-reply / late-follow-up counts for the report's chart. */
-  static async getSeries(
-    from: Date,
-    to: Date,
-    opts: QueryOpts & { granularity?: "day" | "week" | "month" } = {},
-  ): Promise<Array<{ date: string; lateReplies: number; lateFollowUps: number }>> {
-    const rows = await this.getLateRows(from, to, opts);
-    const granularity = opts.granularity ?? "day";
+  /**
+   * Follow-up lateness, entirely in SQL. Shared by every follow-up-lateness
+   * call site below — they differ only in which column (and window) bounds
+   * the scan. Only genuinely-late rows are ever transferred from Postgres.
+   */
+  private static async queryLateFollowUps(
+    bound: FollowUpDateBound,
+    opts: QueryOpts,
+  ): Promise<LateRow[]> {
+    const ownerFilter = opts.userId
+      ? Prisma.sql`AND user_id = ${opts.userId}`
+      : opts.restrictUserIds
+        ? Prisma.sql`AND user_id = ANY(${opts.restrictUserIds})`
+        : Prisma.empty;
+    const accountFilter = opts.selfLinkedinId
+      ? Prisma.sql`AND self_linkedin_id = ${opts.selfLinkedinId}`
+      : Prisma.empty;
+    const boundFilter =
+      bound === null
+        ? Prisma.empty
+        : bound.column === "occurred_at"
+          ? Prisma.sql`AND occurred_at >= ${bound.from} AND occurred_at <= ${bound.to}`
+          : Prisma.sql`AND responds_to_at >= ${bound.from} AND responds_to_at <= ${bound.to}`;
+
+    const rows = await prisma.$queryRaw<
+      Array<{
+        user_id: string;
+        conversation_key: string;
+        occurred_at: Date;
+        responds_to_at: Date;
+        participant_linkedin_id: string | null;
+        self_linkedin_id: string | null;
+      }>
+    >`
+      SELECT user_id, conversation_key, occurred_at, responds_to_at,
+             participant_linkedin_id, self_linkedin_id
+      FROM message_events
+      WHERE is_follow_up = true
+        AND responds_to_at IS NOT NULL
+        AND occurred_at > responds_to_at + (${LATE_FOLLOWUP_THRESHOLD_DAYS} * INTERVAL '1 day')
+        ${boundFilter}
+        ${ownerFilter}
+        ${accountFilter}
+    `;
+
+    return rows.map((r) => ({
+      userId: r.user_id,
+      conversationKey: r.conversation_key,
+      occurredAt: r.occurred_at,
+      respondsToAt: r.responds_to_at,
+      selfTimeZone: null,
+      isFollowUp: true,
+      participantLinkedinId: r.participant_linkedin_id,
+      selfLinkedinId: r.self_linkedin_id,
+      kind: "LATE_FOLLOW_UP" as const,
+    }));
+  }
+
+  /**
+   * Every SENT message in the window that responded to something later than
+   * its deadline — replies and follow-ups combined. This is the general-
+   * purpose entry point behind getSeries/getTotals/list: fetch ONCE here, then
+   * derive whatever views you need from the same array via the pure
+   * buildSeries/buildTotals helpers below, instead of each view re-querying
+   * independently for the same window.
+   */
+  static async getLateRows(from: Date, to: Date, opts: QueryOpts = {}): Promise<LateRow[]> {
+    const [replies, followUps] = await Promise.all([
+      this.getLateReplyRows(from, to, opts),
+      this.queryLateFollowUps({ column: "occurred_at", from, to }, opts),
+    ]);
+    return [...replies, ...followUps];
+  }
+
+  /** Pure aggregation: buckets already-fetched rows into the chart series. No DB access. */
+  static buildSeries(
+    rows: LateRow[],
+    granularity: "day" | "week" | "month" = "day",
+  ): Array<{ date: string; lateReplies: number; lateFollowUps: number }> {
     const buckets = new Map<string, { lateReplies: number; lateFollowUps: number }>();
     for (const r of rows) {
       const key = truncUTC(r.occurredAt, granularity);
@@ -226,13 +313,8 @@ export class LateMessageService {
       .sort((a, b) => a.date.localeCompare(b.date));
   }
 
-  /** Totals over the window, for the report's KPI cards. */
-  static async getTotals(
-    from: Date,
-    to: Date,
-    opts: QueryOpts = {},
-  ): Promise<{ lateReplies: number; lateFollowUps: number }> {
-    const rows = await this.getLateRows(from, to, opts);
+  /** Pure aggregation: totals from already-fetched rows. No DB access. */
+  static buildTotals(rows: LateRow[]): { lateReplies: number; lateFollowUps: number } {
     let lateReplies = 0;
     let lateFollowUps = 0;
     for (const r of rows) {
@@ -240,6 +322,26 @@ export class LateMessageService {
       else lateFollowUps += 1;
     }
     return { lateReplies, lateFollowUps };
+  }
+
+  /** Per-bucket late-reply / late-follow-up counts for the report's chart. */
+  static async getSeries(
+    from: Date,
+    to: Date,
+    opts: QueryOpts & { granularity?: "day" | "week" | "month" } = {},
+  ): Promise<Array<{ date: string; lateReplies: number; lateFollowUps: number }>> {
+    const rows = await this.getLateRows(from, to, opts);
+    return this.buildSeries(rows, opts.granularity ?? "day");
+  }
+
+  /** Totals over the window, for the report's KPI cards. */
+  static async getTotals(
+    from: Date,
+    to: Date,
+    opts: QueryOpts = {},
+  ): Promise<{ lateReplies: number; lateFollowUps: number }> {
+    const rows = await this.getLateRows(from, to, opts);
+    return this.buildTotals(rows);
   }
 
   /**
@@ -338,13 +440,15 @@ export class LateMessageService {
   /**
    * ALL-TIME (unbounded, not windowed by a report date range) LATE_FOLLOW_UP
    * instances: conversations where a follow-up eventually WAS sent, just
-   * later than the 7-day deadline. Used by missedFollowUpService to build the
-   * "missed, then resolved late" history — merged with the still-open
-   * backlog so an admin can see the full lifecycle, not just current state.
+   * later than the FOLLOWUP_THRESHOLD_DAYS deadline. Used by
+   * missedFollowUpService to build the "missed, then resolved late" history —
+   * merged with the still-open backlog so an admin can see the full
+   * lifecycle, not just current state. SQL-filtered like every follow-up
+   * query above, so "all time" only ever transfers the rows that actually
+   * qualify, not the full SENT-with-a-response history.
    */
-  static async getFollowUpHistory(opts: QueryOpts, now: Date): Promise<LateRow[]> {
-    const rows = await this.getLateRows(new Date(0), now, opts);
-    return rows.filter((r) => r.kind === "LATE_FOLLOW_UP");
+  static async getFollowUpHistory(opts: QueryOpts): Promise<LateRow[]> {
+    return this.queryLateFollowUps(null, opts);
   }
 
   /**
@@ -364,35 +468,11 @@ export class LateMessageService {
     deadlineTo: Date,
     opts: QueryOpts,
   ): Promise<LateRow[]> {
-    const respondsFrom = new Date(deadlineFrom.getTime() - FOLLOWUP_THRESHOLD_DAYS * DAY_MS);
-    const respondsTo = new Date(deadlineTo.getTime() - FOLLOWUP_THRESHOLD_DAYS * DAY_MS);
-
-    const candidates = await prisma.messageEvent.findMany({
-      where: {
-        isFollowUp: true,
-        respondsToAt: { gte: respondsFrom, lte: respondsTo },
-        ...(opts.userId
-          ? { userId: opts.userId }
-          : opts.restrictUserIds
-            ? { userId: { in: opts.restrictUserIds } }
-            : {}),
-        ...(opts.selfLinkedinId ? { selfLinkedinId: opts.selfLinkedinId } : {}),
-      },
-      select: {
-        userId: true,
-        conversationKey: true,
-        occurredAt: true,
-        respondsToAt: true,
-        selfTimeZone: true,
-        isFollowUp: true,
-        participantLinkedinId: true,
-        selfLinkedinId: true,
-      },
-    });
-
-    return candidates
-      .filter((c): c is CandidateRow & { respondsToAt: Date } => c.respondsToAt !== null)
-      .map((c) => ({ ...c, kind: "LATE_FOLLOW_UP" as const }))
-      .filter((c) => c.occurredAt.getTime() > computeFollowUpDeadline(c.respondsToAt).getTime());
+    const respondsFrom = new Date(deadlineFrom.getTime() - LATE_FOLLOWUP_THRESHOLD_DAYS * DAY_MS);
+    const respondsTo = new Date(deadlineTo.getTime() - LATE_FOLLOWUP_THRESHOLD_DAYS * DAY_MS);
+    return this.queryLateFollowUps(
+      { column: "responds_to_at", from: respondsFrom, to: respondsTo },
+      opts,
+    );
   }
 }

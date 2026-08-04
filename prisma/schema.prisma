@@ -195,7 +195,7 @@ enum MessageEventType {
   RECEIVED
 }
 
-// APPEND-ONLY per-message history, one row per (user, conversation, message).
+// Per-message history, one row per (user, conversation, message).
 //
 // WHY THIS EXISTS: MessageActivity above holds one row per conversation with
 // LIFETIME aggregate counts, keyed to the conversation's lastMessageAt. A
@@ -206,11 +206,17 @@ enum MessageEventType {
 // its own event, at its own occurredAt, so a day/week/month series reflects
 // when activity actually happened.
 //
-// The extension derives these flags client-side (in deriveActivity, which has
-// the full ordered message list) and the backend just inserts them
-// idempotently — ON CONFLICT DO NOTHING keyed on messageId, since the same
-// thread gets re-fetched/re-derived on every page load and a message's
-// content never changes once delivered.
+// occurredAt and type are immutable facts and never change once written. The
+// classification fields (isFirstTouch, isFollowUp, isFirstReply, respondsToAt)
+// are NOT insert-only: the extension derives them from whatever conversation
+// history is currently loaded, and LinkedIn paginates — a long thread's full
+// history isn't loaded on first open. An early derivation can genuinely be
+// wrong about a boundary message (verified live: a message looked like a
+// conversation's "first touch" until older history loaded and revealed it
+// was really a follow-up). messageEventService.recordEvents UPSERTS the
+// classification fields using a merge rule proven safe in both directions
+// (a more- or a less-informed later call) — see that file for the full
+// reasoning per field.
 model MessageEvent {
   id              String           @id @default(uuid())
   userId          String           @map("user_id")

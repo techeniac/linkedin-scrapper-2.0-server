@@ -1,17 +1,53 @@
 // src/services/messageEventService.ts
 import { Prisma, MessageEventType } from "@prisma/client";
+import { randomUUID } from "crypto";
 import prisma from "../config/prisma";
 
 /**
- * Append-only per-message history — see the MessageEvent model comment in
- * schema.prisma for why this exists (MessageActivity's lastMessageAt bucketing
- * misattributes a conversation's whole lifetime to a single day).
+ * Per-message history — see the MessageEvent model comment in schema.prisma
+ * for why this exists (MessageActivity's lastMessageAt bucketing misattributes
+ * a conversation's whole lifetime to a single day).
  *
  * The extension derives these flags client-side, in deriveActivity, which
- * walks the conversation's full ordered message list once per record — the
- * natural place to compute "is this the first message we ever sent here" or
- * "did this immediately follow our own prior send". The backend only inserts
- * them, idempotently.
+ * walks whatever messages are CURRENTLY LOADED for a conversation. LinkedIn
+ * paginates — a long thread's full history is not loaded on first open, more
+ * arrives as the user scrolls back — so an early derivation can genuinely be
+ * wrong about a boundary message: with only the newest slice loaded, the
+ * earliest-visible self-message looks like "the first thing I ever sent"
+ * (isFirstTouch=true, respondsToAt=null) when in truth it responds to
+ * something further back that simply hadn't loaded yet.
+ *
+ * VERIFIED live against a real conversation (2026-08): a message loaded on
+ * its own (2 total messages visible) was recorded isFirstTouch=true,
+ * isFollowUp=false, respondsToAt=null. Once the same conversation's fuller
+ * history loaded (7 messages, going back 3 months further), the SAME message
+ * correctly derived as isFirstTouch=false, isFollowUp=true,
+ * respondsToAt=<the actual prior message>. Same for isFirstReply on the reply
+ * that followed it.
+ *
+ * recordEvents therefore UPSERTS rather than pure-inserts, so a later, more-
+ * informed derivation can correct an earlier, partial one. Each field's merge
+ * rule is chosen so a REGRESSION is impossible even if a later call happens to
+ * see LESS history than a previous one (a fresh page session's first batch
+ * size varies — we observed 2 one time, 20 another, for the same account):
+ *
+ *   isFirstTouch / isFirstReply : AND  — more history can only reveal an
+ *     earlier message and so DEMOTE a false "this is the first X"; it can
+ *     never manufacture a new one. Once any derivation says false, it must
+ *     stay false forever.
+ *   isFollowUp                  : OR   — the mirror case: more history can
+ *     only PROMOTE a message to "this is a follow-up" by revealing the self-
+ *     message it re-pings; once any derivation says true, it stays true.
+ *   respondsToAt                : GREATEST — the true value is the closest
+ *     preceding message's time. More history can only reveal a CLOSER
+ *     predecessor (a later timestamp, still before this message), never a
+ *     more distant one. Postgres GREATEST ignores NULLs, so "no predecessor
+ *     known yet" correctly loses to any real value.
+ *   selfTimeZone / participantLinkedinId / selfLinkedinId : COALESCE(new, old)
+ *     — plain identity/context fields, never wipe a known value with a
+ *     missing one.
+ *   occurredAt / type            : immutable facts about the message itself
+ *     (when it was delivered, who sent it) — never part of the UPDATE.
  */
 
 export interface MessageEventInput {
@@ -39,9 +75,15 @@ const toDate = (v: string): Date | null => {
 
 export class MessageEventService {
   /**
-   * Insert this batch's events, skipping any already recorded (same
-   * conversation re-derived on every page load — most of the batch is usually
-   * a repeat). Never updates: a delivered message's facts don't change.
+   * Record this batch's events. New messageIds are inserted as-is; a
+   * messageId already on file has its derived-classification fields MERGED
+   * with the new derivation rather than overwritten — see the class-level
+   * comment for why each field's merge rule is safe in both directions
+   * (a more-informed OR a less-informed later call).
+   *
+   * One conversation's batch is rarely more than a few hundred messages, so a
+   * per-row statement inside a single transaction is simple and fast enough;
+   * this isn't a path that needs bulk multi-row SQL.
    */
   static async recordEvents(
     userId: string,
@@ -54,6 +96,7 @@ export class MessageEventService {
         const occurredAt = toDate(e.occurredAt);
         if (!occurredAt) return null;
         return {
+          id: randomUUID(),
           userId,
           conversationKey: input.conversationKey,
           messageId: e.messageId,
@@ -72,10 +115,32 @@ export class MessageEventService {
 
     if (!rows.length) return;
 
-    await prisma.messageEvent.createMany({
-      data: rows,
-      skipDuplicates: true,
-    });
+    await prisma.$transaction(
+      rows.map(
+        (r) => prisma.$executeRaw`
+          INSERT INTO message_events (
+            id, user_id, conversation_key, message_id, type, occurred_at,
+            is_first_touch, is_follow_up, is_first_reply, responds_to_at,
+            self_time_zone, participant_linkedin_id, self_linkedin_id, created_at
+          ) VALUES (
+            ${r.id}, ${r.userId}, ${r.conversationKey}, ${r.messageId},
+            ${r.type}::"MessageEventType", ${r.occurredAt},
+            ${r.isFirstTouch}, ${r.isFollowUp}, ${r.isFirstReply}, ${r.respondsToAt},
+            ${r.selfTimeZone}, ${r.participantLinkedinId}, ${r.selfLinkedinId}, NOW()
+          )
+          ON CONFLICT (user_id, conversation_key, message_id) DO UPDATE SET
+            is_first_touch = message_events.is_first_touch AND EXCLUDED.is_first_touch,
+            is_first_reply = message_events.is_first_reply AND EXCLUDED.is_first_reply,
+            is_follow_up   = message_events.is_follow_up   OR  EXCLUDED.is_follow_up,
+            responds_to_at = GREATEST(message_events.responds_to_at, EXCLUDED.responds_to_at),
+            self_time_zone = COALESCE(EXCLUDED.self_time_zone, message_events.self_time_zone),
+            participant_linkedin_id = COALESCE(EXCLUDED.participant_linkedin_id, message_events.participant_linkedin_id),
+            self_linkedin_id        = COALESCE(EXCLUDED.self_linkedin_id, message_events.self_linkedin_id)
+            -- occurred_at and type are immutable facts about the message and
+            -- are deliberately excluded from this UPDATE.
+        `,
+      ),
+    );
   }
 
   /**

@@ -86,16 +86,50 @@ export function resolveTimeZone(tz?: string): string {
 
 export function convertLocalTimeToUTC(date: string, time: string, timeZone = "UTC"): string {
   const tz = resolveTimeZone(timeZone);
-  // Treat the local date+time as UTC initially, then find the true offset in the target timezone
-  const localAsUtc = new Date(`${date}T${time}:00Z`);
-  const tzDisplay = new Intl.DateTimeFormat("sv", {
-    timeZone: tz,
-    year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", second: "2-digit",
-  }).format(localAsUtc);
-  // diff = what timezone shows minus what we want — subtract to get real UTC
-  const diff = new Date(tzDisplay + "Z").getTime() - localAsUtc.getTime();
-  return new Date(localAsUtc.getTime() - diff).toISOString();
+  // "YYYY-MM-DD HH:MM:SS" — matches the Intl formatter's output below exactly,
+  // so we can tell when a guess is already correct.
+  const targetLocal = `${date} ${time}:00`;
+  // The target wall-clock time, taken as a raw numeric value (i.e. as if it
+  // were itself a UTC instant). This is the FIXED anchor every correction is
+  // measured from — never reassigned. Only `guess` (the current estimate of
+  // the true UTC instant) is refined each round.
+  const targetAsUtcValue = new Date(`${date}T${time}:00Z`).getTime();
+
+  let guess = new Date(targetAsUtcValue);
+
+  // Iterate toward the UTC instant that actually displays as `targetLocal` in
+  // `tz`. Each round measures tz's offset AT THE CURRENT GUESS
+  // (offset = displayed(guess) − guess) and applies it to the FIXED target —
+  // guess_next = targetAsUtcValue − offset — rather than compounding the
+  // correction onto the previous guess, which would drift by roughly one
+  // offset per round instead of converging (this is the exact bug caught by
+  // verify-dst-fix.ts's round-trip sweep, before this fix).
+  //
+  // A single correction (the original, pre-fix implementation: compute the
+  // offset at the naive guess, apply it once, stop) assumes that offset also
+  // holds at the corrected instant — true almost always, but false when the
+  // wall-clock time falls near a DST transition: the naive guess and the
+  // corrected instant can sit on opposite sides of the transition and have
+  // DIFFERENT offsets, leaving the single-correction result off by the
+  // transition's jump size (typically an hour). UTC offsets are piecewise-
+  // constant, so iterating is guaranteed to converge; real-world zones need
+  // at most one extra round beyond the first. Capped at 4 rounds as a safety
+  // bound — a wall-clock time that never converges (a DST spring-forward gap,
+  // which doesn't correspond to any real instant) exhausts the cap and
+  // returns its last estimate rather than looping.
+  for (let i = 0; i < 4; i++) {
+    const shown = new Intl.DateTimeFormat("sv", {
+      timeZone: tz,
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+    }).format(guess);
+    if (shown === targetLocal) break;
+    // offset = what tz displays for the current guess, minus the guess itself.
+    const offset = new Date(shown + "Z").getTime() - guess.getTime();
+    guess = new Date(targetAsUtcValue - offset);
+  }
+
+  return guess.toISOString();
 }
 
 export function parseHubSpotDateTime(timestamp?: string, timeZone = "UTC"): {

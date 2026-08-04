@@ -168,16 +168,19 @@ export const getSummary = async (
     const userId = pickOwner(req.query.userId, ownerIds);
     const linkedinId = toStr(req.query.linkedinId);
 
+    // Shared scope for the message-derived reports (Late Messages, Missed
+    // Follow-Up) — both filter identically, so define once.
+    const messageOpts = { userId, restrictUserIds: ownerIds, selfLinkedinId: linkedinId };
+
     const [
       connectionsSeries,
       connectionsActivitySeries,
       connectionsTotals,
       messagesSeries,
       messagesTotals,
-      lateSeries,
-      lateTotals,
-      missedFollowUpSeries,
-      missedFollowUpNow,
+      lateRows,
+      missedBacklog,
+      missedCrossings,
       linkedinAccounts,
     ] = await Promise.all([
       // COHORT: of requests sent in each bucket, their status now.
@@ -212,35 +215,26 @@ export const getSummary = async (
         restrictUserIds: ownerIds,
         selfLinkedinId: linkedinId,
       }),
-      // Late Messages report: SENT messages that answered something later
-      // than the deadline (see lateMessageService.ts for the quiet-hours rule).
-      LateMessageService.getSeries(from, to, {
-        userId,
-        restrictUserIds: ownerIds,
-        selfLinkedinId: linkedinId,
-        granularity,
-      }),
-      LateMessageService.getTotals(from, to, {
-        userId,
-        restrictUserIds: ownerIds,
-        selfLinkedinId: linkedinId,
-      }),
-      // Missed Follow-Up report: STABLE per-day crossing counts (backlog +
-      // resolved-late, unioned — see missedFollowUpService.ts), unlike
-      // getCurrentCount below which is intentionally a live snapshot.
-      MissedFollowUpService.getSeries(
-        from,
-        to,
-        { userId, restrictUserIds: ownerIds, selfLinkedinId: linkedinId },
-        now,
-      ),
-      // Unbounded live count, mirroring connectionsTotals.pending.
-      MissedFollowUpService.getCurrentCount(
-        { userId, restrictUserIds: ownerIds, selfLinkedinId: linkedinId },
-        now,
-      ),
+      // Late Messages report: fetched ONCE here — series and totals are both
+      // pure derivations of the same row set (see buildSeries/buildTotals
+      // below), rather than each independently re-querying for the identical
+      // window and filters.
+      LateMessageService.getLateRows(from, to, messageOpts),
+      // Missed Follow-Up report: same principle — the backlog (STILL_MISSING)
+      // and the resolved-late crossings are each fetched exactly once, then
+      // reused for both the chart series AND the live KPI count below.
+      MissedFollowUpService.getBacklog(messageOpts, now),
+      LateMessageService.getFollowUpDeadlineCrossings(from, to, messageOpts),
       getLinkedinAccounts(ownerIds),
     ]);
+
+    const lateSeries = LateMessageService.buildSeries(lateRows, granularity);
+    const lateTotals = LateMessageService.buildTotals(lateRows);
+    // STABLE per-day crossing counts (backlog + resolved-late, unioned — see
+    // missedFollowUpService.ts). missedFollowUpNow is a LIVE snapshot derived
+    // from the SAME backlog fetch above — no second query needed for it.
+    const missedFollowUpSeries = MissedFollowUpService.buildSeries(missedBacklog, missedCrossings, from, to);
+    const missedFollowUpNow = missedBacklog.length;
 
     // Pending is a SNAPSHOT, not a time series — "how many are outstanding
     // right now" — so it comes from current state rather than the event log.
