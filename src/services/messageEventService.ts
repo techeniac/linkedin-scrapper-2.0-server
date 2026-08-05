@@ -1,7 +1,7 @@
 // src/services/messageEventService.ts
-import { Prisma, MessageEventType } from "@prisma/client";
+import { MessageEventType } from "@prisma/client";
 import { randomUUID } from "crypto";
-import prisma from "../config/prisma";
+import { MessageEventRepository } from "../repositories/messageEventRepository";
 
 /**
  * Per-message history — see the MessageEvent model comment in schema.prisma
@@ -48,6 +48,10 @@ import prisma from "../config/prisma";
  *     missing one.
  *   occurredAt / type            : immutable facts about the message itself
  *     (when it was delivered, who sent it) — never part of the UPDATE.
+ *
+ * All Prisma/raw-SQL access lives in MessageEventRepository — this service
+ * holds only the business decisions (parsing/validating incoming rows, which
+ * report series to shape).
  */
 
 export interface MessageEventInput {
@@ -115,32 +119,7 @@ export class MessageEventService {
 
     if (!rows.length) return;
 
-    await prisma.$transaction(
-      rows.map(
-        (r) => prisma.$executeRaw`
-          INSERT INTO message_events (
-            id, user_id, conversation_key, message_id, type, occurred_at,
-            is_first_touch, is_follow_up, is_first_reply, responds_to_at,
-            self_time_zone, participant_linkedin_id, self_linkedin_id, created_at
-          ) VALUES (
-            ${r.id}, ${r.userId}, ${r.conversationKey}, ${r.messageId},
-            ${r.type}::"MessageEventType", ${r.occurredAt},
-            ${r.isFirstTouch}, ${r.isFollowUp}, ${r.isFirstReply}, ${r.respondsToAt},
-            ${r.selfTimeZone}, ${r.participantLinkedinId}, ${r.selfLinkedinId}, NOW()
-          )
-          ON CONFLICT (user_id, conversation_key, message_id) DO UPDATE SET
-            is_first_touch = message_events.is_first_touch AND EXCLUDED.is_first_touch,
-            is_first_reply = message_events.is_first_reply AND EXCLUDED.is_first_reply,
-            is_follow_up   = message_events.is_follow_up   OR  EXCLUDED.is_follow_up,
-            responds_to_at = GREATEST(message_events.responds_to_at, EXCLUDED.responds_to_at),
-            self_time_zone = COALESCE(EXCLUDED.self_time_zone, message_events.self_time_zone),
-            participant_linkedin_id = COALESCE(EXCLUDED.participant_linkedin_id, message_events.participant_linkedin_id),
-            self_linkedin_id        = COALESCE(EXCLUDED.self_linkedin_id, message_events.self_linkedin_id)
-            -- occurred_at and type are immutable facts about the message and
-            -- are deliberately excluded from this UPDATE.
-        `,
-      ),
-    );
+    await MessageEventRepository.upsertEvents(rows);
   }
 
   /**
@@ -148,13 +127,14 @@ export class MessageEventService {
    * actually happened — this is what the Messaging Activity report's chart
    * reads instead of MessageActivityService.getSeries.
    */
-  static async getSeries(
+  static getSeries(
     from: Date,
     to: Date,
     opts: {
       userId?: string;
       restrictUserIds?: string[];
       selfLinkedinId?: string;
+      selfLinkedinIds?: string[]; // multi-select account filter; takes precedence over selfLinkedinId
       granularity?: "day" | "week" | "month";
     } = {},
   ): Promise<
@@ -167,47 +147,47 @@ export class MessageEventService {
       replied: number;
     }>
   > {
-    const { userId, restrictUserIds, selfLinkedinId } = opts;
-    const bucket =
-      opts.granularity === "week"
-        ? "week"
-        : opts.granularity === "month"
-          ? "month"
-          : "day";
+    return MessageEventRepository.getSeries(from, to, opts);
+  }
 
-    const ownerFilter = userId
-      ? Prisma.sql`AND user_id = ${userId}`
-      : restrictUserIds
-        ? Prisma.sql`AND user_id = ANY(${restrictUserIds})`
-        : Prisma.empty;
-    const accountFilter = selfLinkedinId
-      ? Prisma.sql`AND self_linkedin_id = ${selfLinkedinId}`
-      : Prisma.empty;
-
-    return prisma.$queryRaw`
-      SELECT to_char(date_trunc(${bucket}, occurred_at), 'YYYY-MM-DD') AS date,
-             COUNT(*) FILTER (WHERE type = 'SENT' AND is_first_touch)::int  AS fresh,
-             COUNT(*) FILTER (WHERE type = 'SENT' AND is_follow_up)::int   AS followups,
-             COUNT(*) FILTER (WHERE type = 'SENT')::int                   AS sent,
-             COUNT(*) FILTER (WHERE type = 'RECEIVED')::int               AS received,
-             COUNT(*) FILTER (WHERE type = 'RECEIVED' AND is_first_reply)::int AS replied
-      FROM message_events
-      WHERE occurred_at >= ${from} AND occurred_at <= ${to}
-        ${ownerFilter}
-        ${accountFilter}
-      GROUP BY 1
-      ORDER BY 1
-    `;
+  /**
+   * Same bucketing as getSeries, but ALSO grouped by owner — one row per
+   * (date, userId). Powers the report chart's per-Sales-Person stacked
+   * segments when more than one owner is selected.
+   */
+  static getSeriesByOwner(
+    from: Date,
+    to: Date,
+    ownerIds: string[],
+    opts: {
+      selfLinkedinId?: string;
+      selfLinkedinIds?: string[];
+      granularity?: "day" | "week" | "month";
+    } = {},
+  ): Promise<
+    Array<{
+      date: string;
+      userId: string;
+      fresh: number;
+      followups: number;
+      sent: number;
+      received: number;
+      replied: number;
+    }>
+  > {
+    if (ownerIds.length === 0) return Promise.resolve([]);
+    return MessageEventRepository.getSeriesByOwner(from, to, ownerIds, opts);
   }
 
   /** Totals over the event history for a window (no bucketing). */
-  static async getTotals(
+  static getTotals(
     from: Date,
     to: Date,
     opts: {
       userId?: string;
       restrictUserIds?: string[];
       selfLinkedinId?: string;
+      selfLinkedinIds?: string[];
     } = {},
   ): Promise<{
     fresh: number;
@@ -216,42 +196,6 @@ export class MessageEventService {
     received: number;
     replied: number;
   }> {
-    const { userId, restrictUserIds, selfLinkedinId } = opts;
-    const ownerFilter = userId
-      ? Prisma.sql`AND user_id = ${userId}`
-      : restrictUserIds
-        ? Prisma.sql`AND user_id = ANY(${restrictUserIds})`
-        : Prisma.empty;
-    const accountFilter = selfLinkedinId
-      ? Prisma.sql`AND self_linkedin_id = ${selfLinkedinId}`
-      : Prisma.empty;
-
-    const rows = await prisma.$queryRaw<
-      Array<{
-        fresh: number;
-        followups: number;
-        sent: number;
-        received: number;
-        replied: number;
-      }>
-    >`
-      SELECT COUNT(*) FILTER (WHERE type = 'SENT' AND is_first_touch)::int  AS fresh,
-             COUNT(*) FILTER (WHERE type = 'SENT' AND is_follow_up)::int   AS followups,
-             COUNT(*) FILTER (WHERE type = 'SENT')::int                   AS sent,
-             COUNT(*) FILTER (WHERE type = 'RECEIVED')::int               AS received,
-             COUNT(*) FILTER (WHERE type = 'RECEIVED' AND is_first_reply)::int AS replied
-      FROM message_events
-      WHERE occurred_at >= ${from} AND occurred_at <= ${to}
-        ${ownerFilter}
-        ${accountFilter}
-    `;
-    const r = rows[0];
-    return {
-      fresh: r?.fresh ?? 0,
-      followups: r?.followups ?? 0,
-      sent: r?.sent ?? 0,
-      received: r?.received ?? 0,
-      replied: r?.replied ?? 0,
-    };
+    return MessageEventRepository.getTotals(from, to, opts);
   }
 }

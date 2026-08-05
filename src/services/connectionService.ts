@@ -1,14 +1,7 @@
 // src/services/connectionService.ts
-import {
-  ConnectionEventSource,
-  ConnectionRequestStatus,
-  Prisma,
-} from "@prisma/client";
-import prisma from "../config/prisma";
-import {
-  ConnectionEventService,
-  estimateExpiryDate,
-} from "./connectionEventService";
+import { ConnectionEventSource, ConnectionRequestStatus, Prisma } from "@prisma/client";
+import { ConnectionRepository } from "../repositories/connectionRepository";
+import { ConnectionEventService, estimateExpiryDate } from "./connectionEventService";
 
 // Read params for the public, paginated connections list.
 export interface ListConnectionsParams {
@@ -20,7 +13,8 @@ export interface ListConnectionsParams {
   userId?: string;
   userIds?: string[]; // restrict to a set of owners (used when no single userId)
   actorLinkedinId?: string; // the logged-in LinkedIn account that sent the request
-  status?: ConnectionRequestStatus;
+  actorLinkedinIds?: string[]; // multi-select account filter; takes precedence over actorLinkedinId
+  statuses?: ConnectionRequestStatus[]; // multi-select Status filter
   sentFrom?: Date;
   sentTo?: Date;
 }
@@ -46,6 +40,10 @@ export interface ListConnectionsParams {
  * This table is the CURRENT-STATE projection and is deliberately lossy — a
  * re-send re-opens the row and overwrites its previous outcome. Historical
  * counts must come from ConnectionRequestEvent (see connectionEventService).
+ *
+ * All Prisma access lives in ConnectionRepository — this service holds only
+ * the business decisions (reconcile's accept/expire rules, which columns are
+ * sortable, how to build the search/date filter for list()).
  */
 
 export interface TrackSentInput {
@@ -227,20 +225,7 @@ export class ConnectionService {
       : {};
 
     // All candidate rows currently pending for this user (+ actor scope).
-    const candidates = await prisma.connectionRequest.findMany({
-      where: {
-        userId,
-        status: ConnectionRequestStatus.PENDING,
-        ...actorScope,
-      },
-      select: {
-        targetLinkedinId: true,
-        targetName: true,
-        targetProfileUrl: true,
-        sentAt: true,
-        absentSince: true,
-      },
-    });
+    const candidates = await ConnectionRepository.findPendingByUser(userId, actorScope);
 
     const connectedMap = new Map(
       connected.map((c) => [c.targetLinkedinId, c]),
@@ -316,14 +301,7 @@ export class ConnectionService {
           );
           if (applied) expired++;
         } else {
-          await prisma.connectionRequest.updateMany({
-            where: {
-              userId,
-              targetLinkedinId: r.targetLinkedinId,
-              status: ConnectionRequestStatus.PENDING,
-            },
-            data: { absentSince: now },
-          });
+          await ConnectionRepository.markAbsent(userId, r.targetLinkedinId, now);
           newlyAbsent++;
         }
       }
@@ -336,14 +314,7 @@ export class ConnectionService {
         )
         .map((r) => r.targetLinkedinId);
       if (backIds.length) {
-        const res = await prisma.connectionRequest.updateMany({
-          where: {
-            userId,
-            status: ConnectionRequestStatus.PENDING,
-            targetLinkedinId: { in: backIds },
-          },
-          data: { absentSince: null },
-        });
+        const res = await ConnectionRepository.clearAbsent(userId, backIds);
         reappeared = res.count;
       }
     }
@@ -367,10 +338,7 @@ export class ConnectionService {
     targetLinkedinId: string,
     targetName: string,
   ): Promise<void> {
-    await prisma.connectionRequest.updateMany({
-      where: { userId, targetLinkedinId, targetName: null },
-      data: { targetName },
-    });
+    await ConnectionRepository.backfillName(userId, targetLinkedinId, targetName);
   }
 
   /**
@@ -389,11 +357,7 @@ export class ConnectionService {
         ? { userId: { in: restrictUserIds } }
         : {};
 
-    const grouped = await prisma.connectionRequest.groupBy({
-      by: ["status"],
-      _count: { _all: true },
-      where,
-    });
+    const grouped = await ConnectionRepository.groupByStatus(where);
 
     const stats: ConnectionStats = {
       sent: 0,
@@ -465,8 +429,9 @@ export class ConnectionService {
     const where: Prisma.ConnectionRequestWhereInput = {};
     if (p.userId) where.userId = p.userId;
     else if (p.userIds) where.userId = { in: p.userIds };
-    if (p.actorLinkedinId) where.actorLinkedinId = p.actorLinkedinId;
-    if (p.status) where.status = p.status;
+    if (p.actorLinkedinIds?.length) where.actorLinkedinId = { in: p.actorLinkedinIds };
+    else if (p.actorLinkedinId) where.actorLinkedinId = p.actorLinkedinId;
+    if (p.statuses?.length) where.status = { in: p.statuses };
     if (p.sentFrom || p.sentTo) {
       where.sentAt = {};
       if (p.sentFrom) where.sentAt.gte = p.sentFrom;
@@ -480,27 +445,12 @@ export class ConnectionService {
       ];
     }
 
-    const [data, total] = await prisma.$transaction([
-      prisma.connectionRequest.findMany({
-        where,
-        orderBy: { [sortBy]: sortOrder } as Prisma.ConnectionRequestOrderByWithRelationInput,
-        skip: (page - 1) * limit,
-        take: limit,
-        select: {
-          id: true,
-          userId: true, // so the controller can map the owner to its HubSpot name
-          targetName: true,
-          targetProfileUrl: true,
-          targetLinkedinId: true,
-          actorName: true,
-          status: true,
-          sentAt: true,
-          resolvedAt: true,
-          user: { select: { name: true } }, // DB-name fallback
-        },
-      }),
-      prisma.connectionRequest.count({ where }),
-    ]);
+    const [data, total] = await ConnectionRepository.findAndCount(
+      where,
+      { [sortBy]: sortOrder } as Prisma.ConnectionRequestOrderByWithRelationInput,
+      (page - 1) * limit,
+      limit,
+    );
 
     return {
       data,
@@ -518,7 +468,7 @@ export class ConnectionService {
    * happened in this period", use ConnectionEventService.getSeries instead,
    * which reads the append-only event log and survives re-sends.
    */
-  static async getSeries(
+  static getSeries(
     userId: string | undefined,
     from: Date,
     to: Date,
@@ -537,35 +487,6 @@ export class ConnectionService {
       withdrawn: number;
     }>
   > {
-    const ownerFilter = userId
-      ? Prisma.sql`AND user_id = ${userId}`
-      : restrictUserIds
-        ? Prisma.sql`AND user_id = ANY(${restrictUserIds})`
-        : Prisma.empty;
-    const accountFilter = actorLinkedinId
-      ? Prisma.sql`AND actor_linkedin_id = ${actorLinkedinId}`
-      : Prisma.empty;
-    // Whitelisted bucket unit for date_trunc (day / week[Mon start] / month).
-    const bucket =
-      granularity === "week" ? "week" : granularity === "month" ? "month" : "day";
-
-    // `date` is the bucket-start (Mon for week, 1st for month) as YYYY-MM-DD.
-    // `expired` counts EXPIRED plus any legacy NOT_ACCEPTED rows, so historical
-    // data isn't silently dropped from the chart after the rename.
-    return prisma.$queryRaw`
-      SELECT to_char(date_trunc(${bucket}, sent_at), 'YYYY-MM-DD') AS date,
-             COUNT(*)::int AS sent,
-             COUNT(*) FILTER (WHERE status = 'ACCEPTED')::int  AS accepted,
-             COUNT(*) FILTER (WHERE status = 'PENDING')::int   AS pending,
-             COUNT(*) FILTER (WHERE status IN ('EXPIRED', 'NOT_ACCEPTED'))::int AS expired,
-             COUNT(*) FILTER (WHERE status IN ('EXPIRED', 'NOT_ACCEPTED'))::int AS ignored,
-             COUNT(*) FILTER (WHERE status = 'WITHDRAWN')::int AS withdrawn
-      FROM connection_requests
-      WHERE sent_at >= ${from} AND sent_at <= ${to}
-        ${ownerFilter}
-        ${accountFilter}
-      GROUP BY 1
-      ORDER BY 1
-    `;
+    return ConnectionRepository.getCohortSeries(from, to, { userId, restrictUserIds, actorLinkedinId }, granularity);
   }
 }

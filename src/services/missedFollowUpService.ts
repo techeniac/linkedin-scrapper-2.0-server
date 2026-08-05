@@ -1,6 +1,6 @@
 // src/services/missedFollowUpService.ts
-import { Prisma } from "@prisma/client";
-import prisma from "../config/prisma";
+import { MissedFollowUpRepository } from "../repositories/missedFollowUpRepository";
+import { LateMessageRepository } from "../repositories/lateMessageRepository";
 import { computeFollowUpDeadline, LateMessageService } from "./lateMessageService";
 
 /**
@@ -60,6 +60,7 @@ interface QueryOpts {
   userId?: string;
   restrictUserIds?: string[];
   selfLinkedinId?: string;
+  selfLinkedinIds?: string[]; // multi-select account filter; takes precedence over selfLinkedinId
 }
 
 function truncUTC(d: Date): string {
@@ -90,42 +91,17 @@ export class MissedFollowUpService {
    * with no way to know which side "really" came last.
    */
   static async getBacklog(opts: QueryOpts, now: Date): Promise<BacklogRow[]> {
-    const ownerFilter = opts.userId
-      ? Prisma.sql`AND user_id = ${opts.userId}`
-      : opts.restrictUserIds
-        ? Prisma.sql`AND user_id = ANY(${opts.restrictUserIds})`
-        : Prisma.empty;
-    const accountFilter = opts.selfLinkedinId
-      ? Prisma.sql`AND self_linkedin_id = ${opts.selfLinkedinId}`
-      : Prisma.empty;
-
-    const lastEvents = await prisma.$queryRaw<
-      Array<{
-        user_id: string;
-        conversation_key: string;
-        type: "SENT" | "RECEIVED";
-        occurred_at: Date;
-        participant_linkedin_id: string | null;
-        self_linkedin_id: string | null;
-      }>
-    >`
-      SELECT DISTINCT ON (user_id, conversation_key)
-        user_id, conversation_key, type, occurred_at,
-        participant_linkedin_id, self_linkedin_id
-      FROM message_events
-      WHERE true ${ownerFilter} ${accountFilter}
-      ORDER BY user_id, conversation_key, occurred_at DESC, (type = 'RECEIVED') DESC
-    `;
+    const lastEvents = await MissedFollowUpRepository.findLastEventPerConversation(opts);
 
     return lastEvents
       .filter((e) => e.type === "SENT")
       .map((e) => ({
-        userId: e.user_id,
-        conversationKey: e.conversation_key,
-        lastSentAt: e.occurred_at,
-        deadline: computeFollowUpDeadline(e.occurred_at),
-        participantLinkedinId: e.participant_linkedin_id,
-        selfLinkedinId: e.self_linkedin_id,
+        userId: e.userId,
+        conversationKey: e.conversationKey,
+        lastSentAt: e.occurredAt,
+        deadline: computeFollowUpDeadline(e.occurredAt),
+        participantLinkedinId: e.participantLinkedinId,
+        selfLinkedinId: e.selfLinkedinId,
       }))
       .filter((r) => now.getTime() > r.deadline.getTime());
   }
@@ -141,18 +117,54 @@ export class MissedFollowUpService {
     resolvedCrossings: Array<{ respondsToAt: Date }>,
     from: Date,
     to: Date,
-  ): Array<{ date: string; count: number }> {
-    const buckets = new Map<string, number>();
-    const bump = (deadline: Date) => {
+  ): Array<{ date: string; stillMissing: number; resolvedLate: number }> {
+    const buckets = new Map<string, { stillMissing: number; resolvedLate: number }>();
+    const bump = (deadline: Date, field: "stillMissing" | "resolvedLate") => {
       if (deadline < from || deadline > to) return;
       const key = truncUTC(deadline);
-      buckets.set(key, (buckets.get(key) ?? 0) + 1);
+      const b = buckets.get(key) ?? { stillMissing: 0, resolvedLate: 0 };
+      b[field] += 1;
+      buckets.set(key, b);
     };
-    for (const r of backlog) bump(r.deadline);
-    for (const r of resolvedCrossings) bump(computeFollowUpDeadline(r.respondsToAt));
+    for (const r of backlog) bump(r.deadline, "stillMissing");
+    for (const r of resolvedCrossings) bump(computeFollowUpDeadline(r.respondsToAt), "resolvedLate");
 
     return Array.from(buckets.entries())
-      .map(([date, count]) => ({ date, count }))
+      .map(([date, v]) => ({ date, ...v }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+  }
+
+  /**
+   * Same combination as buildSeries, but ALSO split by owner — one entry per
+   * (date, userId), restricted to `ownerIds`. Pure aggregation over rows
+   * ALREADY fetched by getBacklog / getFollowUpDeadlineCrossings — no second
+   * query. Powers the report chart's per-Sales-Person stacked segments.
+   */
+  static buildSeriesByOwner(
+    backlog: BacklogRow[],
+    resolvedCrossings: Array<{ userId: string; respondsToAt: Date }>,
+    ownerIds: string[],
+    from: Date,
+    to: Date,
+  ): Array<{ date: string; userId: string; stillMissing: number; resolvedLate: number }> {
+    const allowed = new Set(ownerIds);
+    const buckets = new Map<string, { stillMissing: number; resolvedLate: number }>();
+    const bump = (userId: string, deadline: Date, field: "stillMissing" | "resolvedLate") => {
+      if (!allowed.has(userId)) return;
+      if (deadline < from || deadline > to) return;
+      const key = `${truncUTC(deadline)}::${userId}`;
+      const b = buckets.get(key) ?? { stillMissing: 0, resolvedLate: 0 };
+      b[field] += 1;
+      buckets.set(key, b);
+    };
+    for (const r of backlog) bump(r.userId, r.deadline, "stillMissing");
+    for (const r of resolvedCrossings) bump(r.userId, computeFollowUpDeadline(r.respondsToAt), "resolvedLate");
+
+    return Array.from(buckets.entries())
+      .map(([key, v]) => {
+        const [date, userId] = key.split("::");
+        return { date, userId, ...v };
+      })
       .sort((a, b) => a.date.localeCompare(b.date));
   }
 
@@ -180,7 +192,7 @@ export class MissedFollowUpService {
     to: Date,
     opts: QueryOpts,
     now: Date,
-  ): Promise<Array<{ date: string; count: number }>> {
+  ): Promise<Array<{ date: string; stillMissing: number; resolvedLate: number }>> {
     const [backlog, resolvedCrossings] = await Promise.all([
       this.getBacklog(opts, now),
       LateMessageService.getFollowUpDeadlineCrossings(from, to, opts),
@@ -204,6 +216,8 @@ export class MissedFollowUpService {
     userId?: string;
     userIds?: string[];
     selfLinkedinId?: string;
+    selfLinkedinIds?: string[];
+    status?: "STILL_MISSING" | "RESOLVED_LATE";
     now: Date;
   }): Promise<{
     data: Array<{
@@ -226,6 +240,7 @@ export class MissedFollowUpService {
       userId: params.userId,
       restrictUserIds: params.userIds,
       selfLinkedinId: params.selfLinkedinId,
+      selfLinkedinIds: params.selfLinkedinIds,
     };
 
     interface HistoryRow {
@@ -280,24 +295,14 @@ export class MissedFollowUpService {
       });
     }
 
-    const rows = Array.from(byConversation.values()).sort((a, b) => b.recency - a.recency);
+    const allRows = Array.from(byConversation.values()).sort((a, b) => b.recency - a.recency);
+    const rows = params.status ? allRows.filter((r) => r.status === params.status) : allRows;
     const total = rows.length;
     const page_ = rows.slice((page - 1) * limit, (page - 1) * limit + limit);
 
-    const activities = page_.length
-      ? await prisma.messageActivity.findMany({
-          where: {
-            OR: page_.map((r) => ({ userId: r.userId, conversationKey: r.conversationKey })),
-          },
-          select: {
-            userId: true,
-            conversationKey: true,
-            participantName: true,
-            participantProfileUrl: true,
-            selfName: true,
-          },
-        })
-      : [];
+    const activities = await LateMessageRepository.findActivityIdentities(
+      page_.map((r) => ({ userId: r.userId, conversationKey: r.conversationKey })),
+    );
     const byKey = new Map(activities.map((a) => [`${a.userId}:${a.conversationKey}`, a]));
 
     const data = page_.map((r) => {

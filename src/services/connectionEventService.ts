@@ -1,10 +1,6 @@
 // src/services/connectionEventService.ts
-import {
-  ConnectionEventSource,
-  ConnectionRequestStatus,
-  Prisma,
-} from "@prisma/client";
-import prisma from "../config/prisma";
+import { ConnectionEventSource, ConnectionRequestStatus, Prisma } from "@prisma/client";
+import { ConnectionEventRepository } from "../repositories/connectionEventRepository";
 import { LINKEDIN_INVITE_EXPIRY_MONTHS } from "../config/env";
 
 /**
@@ -24,6 +20,10 @@ import { LINKEDIN_INVITE_EXPIRY_MONTHS } from "../config/env";
  * EVERY status write must go through ConnectionEventService.applyTransition so
  * an event can't be forgotten — the state change and its event are written in
  * one transaction.
+ *
+ * All Prisma/raw-SQL access lives in ConnectionEventRepository — this service
+ * holds only the business decisions (which prior statuses are valid, when a
+ * transition counts as "the same status", how to shape a report series).
  */
 
 // LinkedIn expires sent invitations after ~6 months — see config/env.ts for
@@ -77,12 +77,6 @@ export const estimateExpiryDate = (sentAt: Date, detectedAt: Date): Date => {
   return aged <= detectedAt ? aged : detectedAt;
 };
 
-// Shared by applyTransition and recordSent below — see the CONCURRENCY note
-// on applyTransition for why the defaults (2s connection-wait / 5s run) are
-// too tight here: a transaction that deliberately waits on a row lock needs
-// more room than one that never expects to block.
-const TRANSACTION_OPTIONS = { maxWait: 10_000, timeout: 10_000 };
-
 export class ConnectionEventService {
   /**
    * Record a transition: write the event and move the current-state row, in one
@@ -94,14 +88,15 @@ export class ConnectionEventService {
    * already-terminal row. When the guard doesn't match, nothing is written and
    * NO event is emitted (there was no transition).
    *
-   * CONCURRENCY: the read-and-check happens via `SELECT ... FOR UPDATE`, which
-   * takes a row lock inside this transaction. A concurrent call racing on the
-   * SAME (userId, targetLinkedinId) — e.g. two open LinkedIn tabs both
-   * reconciling around the same moment — blocks on that lock until this
-   * transaction commits, then re-reads the ALREADY-UPDATED row and correctly
-   * finds its status no longer matches `expectedFrom`. Without the lock, both
-   * calls could read the row before either writes, both pass the guard, and
-   * both write — recording the same transition twice.
+   * CONCURRENCY: the read-and-check happens via `SELECT ... FOR UPDATE`
+   * (ConnectionEventRepository.lockRequestRow), which takes a row lock inside
+   * this transaction. A concurrent call racing on the SAME (userId,
+   * targetLinkedinId) — e.g. two open LinkedIn tabs both reconciling around
+   * the same moment — blocks on that lock until this transaction commits,
+   * then re-reads the ALREADY-UPDATED row and correctly finds its status no
+   * longer matches `expectedFrom`. Without the lock, both calls could read
+   * the row before either writes, both pass the guard, and both write —
+   * recording the same transition twice.
    *
    * Returns true when the transition actually applied.
    *
@@ -112,8 +107,9 @@ export class ConnectionEventService {
    * concurrent calls on the same row hit Prisma's default connection-wait
    * window and threw `P2028 Unable to start a transaction in the given time`
    * before either transaction's body even ran, over this project's remote,
-   * pooled connection. Both limits are widened so the loser waits instead of
-   * erroring — that wait is the fix working as intended, not a hang.
+   * pooled connection. Both limits are widened (see the repository's
+   * TRANSACTION_OPTIONS) so the loser waits instead of erroring — that wait
+   * is the fix working as intended, not a hang.
    */
   static async applyTransition(
     input: TransitionInput,
@@ -131,25 +127,8 @@ export class ConnectionEventService {
       actorLinkedinId,
     } = input;
 
-    return prisma.$transaction(async (tx) => {
-      const existingRows = await tx.$queryRaw<
-        Array<{
-          id: string;
-          status: ConnectionRequestStatus;
-          targetName: string | null;
-          targetProfileUrl: string | null;
-          actorLinkedinId: string | null;
-        }>
-      >`
-        SELECT id, status,
-               target_name AS "targetName",
-               target_profile_url AS "targetProfileUrl",
-               actor_linkedin_id AS "actorLinkedinId"
-        FROM connection_requests
-        WHERE user_id = ${userId} AND target_linkedin_id = ${targetLinkedinId}
-        FOR UPDATE
-      `;
-      const existing = existingRows[0];
+    return ConnectionEventRepository.transaction(async tx => {
+      const existing = await ConnectionEventRepository.lockRequestRow(tx, userId, targetLinkedinId);
 
       if (!existing || !expectedFrom.includes(existing.status)) return false;
       // A transition to the status it already holds is not a transition.
@@ -157,35 +136,30 @@ export class ConnectionEventService {
 
       const when = occurredAt ?? new Date();
 
-      await tx.connectionRequest.update({
-        where: { id: existing.id },
-        data: {
-          status: toStatus,
-          resolvedAt: when,
-          // Absence is resolved once a terminal status is written.
-          absentSince: null,
-          ...(targetName != null && { targetName }),
-          ...(targetProfileUrl != null && { targetProfileUrl }),
-        },
+      await ConnectionEventRepository.updateRequest(tx, existing.id, {
+        status: toStatus,
+        resolvedAt: when,
+        // Absence is resolved once a terminal status is written.
+        absentSince: null,
+        ...(targetName != null && { targetName }),
+        ...(targetProfileUrl != null && { targetProfileUrl }),
       });
 
-      await tx.connectionRequestEvent.create({
-        data: {
-          userId,
-          targetLinkedinId,
-          targetName: targetName ?? existing.targetName,
-          targetProfileUrl: targetProfileUrl ?? existing.targetProfileUrl,
-          actorLinkedinId: actorLinkedinId ?? existing.actorLinkedinId,
-          fromStatus: existing.status,
-          toStatus,
-          occurredAt: when,
-          occurredAtIsEstimate,
-          source,
-        },
+      await ConnectionEventRepository.insertEvent(tx, {
+        userId,
+        targetLinkedinId,
+        targetName: targetName ?? existing.targetName,
+        targetProfileUrl: targetProfileUrl ?? existing.targetProfileUrl,
+        actorLinkedinId: actorLinkedinId ?? existing.actorLinkedinId,
+        fromStatus: existing.status,
+        toStatus,
+        occurredAt: when,
+        occurredAtIsEstimate,
+        source,
       });
 
       return true;
-    }, TRANSACTION_OPTIONS);
+    });
   }
 
   /**
@@ -196,17 +170,17 @@ export class ConnectionEventService {
    * Crucially, the row's previous outcome is overwritten but the EVENT for it
    * has already been recorded, so history survives.
    *
-   * CONCURRENCY: when a row already exists, `SELECT ... FOR UPDATE` (as in
+   * CONCURRENCY: when a row already exists, the row lock (as in
    * applyTransition above) makes the read-check-write atomic against a
    * concurrent racer. But a row lock can't protect a row that doesn't exist
    * yet — two concurrent FIRST sends to the SAME never-before-seen target
    * (e.g. two open LinkedIn tabs both intercepting a send to a brand-new
    * contact at the same instant) can both reach the `create()` branch and race
    * on the unique (userId, targetLinkedinId) constraint. One wins; the other
-   * gets a unique-violation (P2002) and retries — the retry's own
-   * `SELECT ... FOR UPDATE` then finds the winner's row and correctly takes
-   * the update branch instead. This is the standard, documented way to handle
-   * a rare insert race without a lock to hold: catch the conflict, retry once.
+   * gets a unique-violation (P2002) and retries — the retry's own row lock
+   * then finds the winner's row and correctly takes the update branch
+   * instead. This is the standard, documented way to handle a rare insert
+   * race without a lock to hold: catch the conflict, retry once.
    */
   static async recordSent(input: TransitionInput): Promise<void> {
     const {
@@ -228,73 +202,57 @@ export class ConnectionEventService {
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       try {
-        await prisma.$transaction(async (tx) => {
-          const existingRows = await tx.$queryRaw<
-            Array<{ id: string; status: ConnectionRequestStatus }>
-          >`
-            SELECT id, status FROM connection_requests
-            WHERE user_id = ${userId} AND target_linkedin_id = ${targetLinkedinId}
-            FOR UPDATE
-          `;
-          const existing = existingRows[0];
+        await ConnectionEventRepository.transaction(async tx => {
+          const existing = await ConnectionEventRepository.lockRequestRow(tx, userId, targetLinkedinId);
 
           // An existing ACCEPTED row is a real connection — never re-open it,
           // and no event for a send that didn't actually change anything.
           if (existing?.status === ConnectionRequestStatus.ACCEPTED) return;
 
           if (existing) {
-            await tx.connectionRequest.update({
-              where: { id: existing.id },
-              data: {
-                ...(targetProfileUrl != null && { targetProfileUrl }),
-                ...(targetName != null && { targetName }),
-                ...(actorLinkedinId != null && { actorLinkedinId }),
-                ...(actorName != null && { actorName }),
-                ...(actorPublicIdentifier != null && { actorPublicIdentifier }),
-                status: ConnectionRequestStatus.PENDING,
-                sentAt: when,
-                sentAtIsEstimate,
-                resolvedAt: null,
-                absentSince: null,
-              },
+            await ConnectionEventRepository.updateRequest(tx, existing.id, {
+              ...(targetProfileUrl != null && { targetProfileUrl }),
+              ...(targetName != null && { targetName }),
+              ...(actorLinkedinId != null && { actorLinkedinId }),
+              ...(actorName != null && { actorName }),
+              ...(actorPublicIdentifier != null && { actorPublicIdentifier }),
+              status: ConnectionRequestStatus.PENDING,
+              sentAt: when,
+              sentAtIsEstimate,
+              resolvedAt: null,
+              absentSince: null,
             });
           } else {
-            await tx.connectionRequest.create({
-              data: {
-                userId,
-                targetLinkedinId,
-                targetProfileUrl: targetProfileUrl ?? null,
-                targetName: targetName ?? null,
-                actorLinkedinId: actorLinkedinId ?? null,
-                actorName: actorName ?? null,
-                actorPublicIdentifier: actorPublicIdentifier ?? null,
-                status: ConnectionRequestStatus.PENDING,
-                sentAt: when,
-                sentAtIsEstimate,
-              },
+            await ConnectionEventRepository.createRequest(tx, {
+              userId,
+              targetLinkedinId,
+              targetProfileUrl: targetProfileUrl ?? null,
+              targetName: targetName ?? null,
+              actorLinkedinId: actorLinkedinId ?? null,
+              actorName: actorName ?? null,
+              actorPublicIdentifier: actorPublicIdentifier ?? null,
+              status: ConnectionRequestStatus.PENDING,
+              sentAt: when,
+              sentAtIsEstimate,
             });
           }
 
-          await tx.connectionRequestEvent.create({
-            data: {
-              userId,
-              targetLinkedinId,
-              targetName: targetName ?? null,
-              targetProfileUrl: targetProfileUrl ?? null,
-              actorLinkedinId: actorLinkedinId ?? null,
-              fromStatus: existing?.status ?? null,
-              toStatus: ConnectionRequestStatus.PENDING,
-              occurredAt: when,
-              occurredAtIsEstimate,
-              source,
-            },
+          await ConnectionEventRepository.insertEvent(tx, {
+            userId,
+            targetLinkedinId,
+            targetName: targetName ?? null,
+            targetProfileUrl: targetProfileUrl ?? null,
+            actorLinkedinId: actorLinkedinId ?? null,
+            fromStatus: existing?.status ?? null,
+            toStatus: ConnectionRequestStatus.PENDING,
+            occurredAt: when,
+            occurredAtIsEstimate,
+            source,
           });
-        }, TRANSACTION_OPTIONS);
+        });
         return; // success
       } catch (err) {
-        const isUniqueViolation =
-          err instanceof Prisma.PrismaClientKnownRequestError &&
-          err.code === "P2002";
+        const isUniqueViolation = err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002";
         if (isUniqueViolation && attempt < MAX_ATTEMPTS) continue;
         throw err;
       }
@@ -306,54 +264,41 @@ export class ConnectionEventService {
    * happened. This is what the Connection Requests report reads for its time
    * series — unlike the current-state table, it survives re-sends.
    */
-  static async getSeries(
+  static getSeries(
     from: Date,
     to: Date,
     opts: {
       userId?: string;
       restrictUserIds?: string[];
       actorLinkedinId?: string;
+      actorLinkedinIds?: string[]; // multi-select account filter; takes precedence over actorLinkedinId
       granularity?: "day" | "week" | "month";
+      statuses?: ConnectionRequestStatus[]; // narrows to a set of statuses' activity — see the report's Status filter
     } = {},
-  ): Promise<
-    Array<{
-      date: string;
-      sent: number;
-      accepted: number;
-      withdrawn: number;
-      expired: number;
-    }>
-  > {
-    const { userId, restrictUserIds, actorLinkedinId } = opts;
-    const bucket =
-      opts.granularity === "week"
-        ? "week"
-        : opts.granularity === "month"
-          ? "month"
-          : "day";
+  ): Promise<Array<{ date: string; sent: number; accepted: number; withdrawn: number; expired: number }>> {
+    return ConnectionEventRepository.getSeries(from, to, opts);
+  }
 
-    const ownerFilter = userId
-      ? Prisma.sql`AND user_id = ${userId}`
-      : restrictUserIds
-        ? Prisma.sql`AND user_id = ANY(${restrictUserIds})`
-        : Prisma.empty;
-    const actorFilter = actorLinkedinId
-      ? Prisma.sql`AND actor_linkedin_id = ${actorLinkedinId}`
-      : Prisma.empty;
-
-    return prisma.$queryRaw`
-      SELECT to_char(date_trunc(${bucket}, occurred_at), 'YYYY-MM-DD') AS date,
-             COUNT(*) FILTER (WHERE to_status = 'PENDING')::int   AS sent,
-             COUNT(*) FILTER (WHERE to_status = 'ACCEPTED')::int  AS accepted,
-             COUNT(*) FILTER (WHERE to_status = 'WITHDRAWN')::int AS withdrawn,
-             COUNT(*) FILTER (WHERE to_status = 'EXPIRED')::int   AS expired
-      FROM connection_request_events
-      WHERE occurred_at >= ${from} AND occurred_at <= ${to}
-        ${ownerFilter}
-        ${actorFilter}
-      GROUP BY 1
-      ORDER BY 1
-    `;
+  /**
+   * Same bucketing as getSeries, but ALSO grouped by owner — one row per
+   * (date, userId) instead of one row per date. Powers the report chart's
+   * per-Sales-Person stacked segments when more than one owner is selected.
+   * A dedicated method (rather than an optional flag on getSeries) since the
+   * two return shapes differ and every caller needs exactly one of them.
+   */
+  static getSeriesByOwner(
+    from: Date,
+    to: Date,
+    ownerIds: string[],
+    opts: {
+      actorLinkedinId?: string;
+      actorLinkedinIds?: string[];
+      granularity?: "day" | "week" | "month";
+      statuses?: ConnectionRequestStatus[];
+    } = {},
+  ): Promise<Array<{ date: string; userId: string; sent: number; accepted: number; withdrawn: number; expired: number }>> {
+    if (ownerIds.length === 0) return Promise.resolve([]);
+    return ConnectionEventRepository.getSeriesByOwner(from, to, ownerIds, opts);
   }
 
   /**
@@ -361,48 +306,16 @@ export class ConnectionEventService {
    * INCLUDING re-sends, which is the honest answer to "how many requests went
    * out" — the current-state table can only ever report one per contact.
    */
-  static async getTotals(
+  static getTotals(
     from: Date,
     to: Date,
     opts: {
       userId?: string;
       restrictUserIds?: string[];
       actorLinkedinId?: string;
+      actorLinkedinIds?: string[];
     } = {},
-  ): Promise<{
-    sent: number;
-    accepted: number;
-    withdrawn: number;
-    expired: number;
-  }> {
-    const { userId, restrictUserIds, actorLinkedinId } = opts;
-    const ownerFilter = userId
-      ? Prisma.sql`AND user_id = ${userId}`
-      : restrictUserIds
-        ? Prisma.sql`AND user_id = ANY(${restrictUserIds})`
-        : Prisma.empty;
-    const actorFilter = actorLinkedinId
-      ? Prisma.sql`AND actor_linkedin_id = ${actorLinkedinId}`
-      : Prisma.empty;
-
-    const rows = await prisma.$queryRaw<
-      Array<{ sent: number; accepted: number; withdrawn: number; expired: number }>
-    >`
-      SELECT COUNT(*) FILTER (WHERE to_status = 'PENDING')::int   AS sent,
-             COUNT(*) FILTER (WHERE to_status = 'ACCEPTED')::int  AS accepted,
-             COUNT(*) FILTER (WHERE to_status = 'WITHDRAWN')::int AS withdrawn,
-             COUNT(*) FILTER (WHERE to_status = 'EXPIRED')::int   AS expired
-      FROM connection_request_events
-      WHERE occurred_at >= ${from} AND occurred_at <= ${to}
-        ${ownerFilter}
-        ${actorFilter}
-    `;
-    const r = rows[0];
-    return {
-      sent: r?.sent ?? 0,
-      accepted: r?.accepted ?? 0,
-      withdrawn: r?.withdrawn ?? 0,
-      expired: r?.expired ?? 0,
-    };
+  ): Promise<{ sent: number; accepted: number; withdrawn: number; expired: number }> {
+    return ConnectionEventRepository.getTotals(from, to, opts);
   }
 }

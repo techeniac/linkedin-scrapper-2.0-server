@@ -1,6 +1,5 @@
 // src/services/lateMessageService.ts
-import prisma from "../config/prisma";
-import { Prisma } from "@prisma/client";
+import { LateMessageRepository, ReplyCandidateRow } from "../repositories/lateMessageRepository";
 import { resolveTimeZone, convertLocalTimeToUTC } from "./hubspotHelpers";
 import {
   LATE_MSG_THRESHOLD_HOURS,
@@ -51,11 +50,16 @@ import {
  *
  * QUERY STRATEGY: LATE_REPLY needs the quiet-hours math above, which isn't
  * reasonably expressible as a single SQL predicate, so those candidates are
- * fetched and classified in JS. LATE_FOLLOW_UP has no such need — its
- * deadline is a flat day-offset — so it is filtered ENTIRELY IN SQL
- * (queryLateFollowUps below): only genuinely-late rows are ever transferred,
- * rather than fetching every SENT-with-a-response row and discarding most of
- * it in Node.
+ * fetched (LateMessageRepository.findSentReplyCandidates) and classified
+ * here in JS. LATE_FOLLOW_UP has no such need — its deadline is a flat
+ * day-offset — so it is filtered ENTIRELY IN SQL
+ * (LateMessageRepository.queryLateFollowUps): only genuinely-late rows are
+ * ever transferred, rather than fetching every SENT-with-a-response row and
+ * discarding most of it in Node.
+ *
+ * All Prisma/raw-SQL access lives in LateMessageRepository — this service
+ * holds only the business decisions (the deadline math, dedup/pagination
+ * rules, how to shape a report series).
  */
 
 // Thresholds validated and centralized in config/env.ts, alongside every
@@ -149,7 +153,7 @@ function truncUTC(d: Date, granularity: "day" | "week" | "month"): string {
   return monday.toISOString().slice(0, 10);
 }
 
-interface CandidateRow {
+export interface LateRow {
   userId: string;
   conversationKey: string;
   occurredAt: Date;
@@ -158,9 +162,6 @@ interface CandidateRow {
   isFollowUp: boolean;
   participantLinkedinId: string | null;
   selfLinkedinId: string | null;
-}
-
-export interface LateRow extends CandidateRow {
   kind: "LATE_REPLY" | "LATE_FOLLOW_UP";
 }
 
@@ -168,13 +169,8 @@ interface QueryOpts {
   userId?: string;
   restrictUserIds?: string[];
   selfLinkedinId?: string;
+  selfLinkedinIds?: string[]; // multi-select account filter; takes precedence over selfLinkedinId
 }
-
-// Which column (and window) bounds a follow-up-lateness scan. null = no
-// window at all (the Missed Follow-Up report's all-time history view).
-type FollowUpDateBound =
-  | { column: "occurred_at" | "responds_to_at"; from: Date; to: Date }
-  | null;
 
 export class LateMessageService {
   /**
@@ -183,100 +179,15 @@ export class LateMessageService {
    * Narrowed to isFollowUp=false so this never fetches rows queryLateFollowUps
    * already owns.
    */
-  private static async getLateReplyRows(
-    from: Date,
-    to: Date,
-    opts: QueryOpts,
-  ): Promise<LateRow[]> {
-    const candidates = await prisma.messageEvent.findMany({
-      where: {
-        type: "SENT",
-        isFollowUp: false,
-        respondsToAt: { not: null },
-        occurredAt: { gte: from, lte: to },
-        ...(opts.userId
-          ? { userId: opts.userId }
-          : opts.restrictUserIds
-            ? { userId: { in: opts.restrictUserIds } }
-            : {}),
-        ...(opts.selfLinkedinId ? { selfLinkedinId: opts.selfLinkedinId } : {}),
-      },
-      select: {
-        userId: true,
-        conversationKey: true,
-        occurredAt: true,
-        respondsToAt: true,
-        selfTimeZone: true,
-        isFollowUp: true,
-        participantLinkedinId: true,
-        selfLinkedinId: true,
-      },
-    });
+  private static async getLateReplyRows(from: Date, to: Date, opts: QueryOpts): Promise<LateRow[]> {
+    const candidates = await LateMessageRepository.findSentReplyCandidates(from, to, opts);
 
     return candidates
-      .filter((c): c is CandidateRow & { respondsToAt: Date } => c.respondsToAt !== null)
+      .filter((c): c is ReplyCandidateRow & { respondsToAt: Date } => c.respondsToAt !== null)
       .map((c) => ({ ...c, kind: "LATE_REPLY" as const }))
       .filter(
         (c) => c.occurredAt.getTime() > computeReplyDeadline(c.respondsToAt, c.selfTimeZone).getTime(),
       );
-  }
-
-  /**
-   * Follow-up lateness, entirely in SQL. Shared by every follow-up-lateness
-   * call site below — they differ only in which column (and window) bounds
-   * the scan. Only genuinely-late rows are ever transferred from Postgres.
-   */
-  private static async queryLateFollowUps(
-    bound: FollowUpDateBound,
-    opts: QueryOpts,
-  ): Promise<LateRow[]> {
-    const ownerFilter = opts.userId
-      ? Prisma.sql`AND user_id = ${opts.userId}`
-      : opts.restrictUserIds
-        ? Prisma.sql`AND user_id = ANY(${opts.restrictUserIds})`
-        : Prisma.empty;
-    const accountFilter = opts.selfLinkedinId
-      ? Prisma.sql`AND self_linkedin_id = ${opts.selfLinkedinId}`
-      : Prisma.empty;
-    const boundFilter =
-      bound === null
-        ? Prisma.empty
-        : bound.column === "occurred_at"
-          ? Prisma.sql`AND occurred_at >= ${bound.from} AND occurred_at <= ${bound.to}`
-          : Prisma.sql`AND responds_to_at >= ${bound.from} AND responds_to_at <= ${bound.to}`;
-
-    const rows = await prisma.$queryRaw<
-      Array<{
-        user_id: string;
-        conversation_key: string;
-        occurred_at: Date;
-        responds_to_at: Date;
-        participant_linkedin_id: string | null;
-        self_linkedin_id: string | null;
-      }>
-    >`
-      SELECT user_id, conversation_key, occurred_at, responds_to_at,
-             participant_linkedin_id, self_linkedin_id
-      FROM message_events
-      WHERE is_follow_up = true
-        AND responds_to_at IS NOT NULL
-        AND occurred_at > responds_to_at + (${LATE_FOLLOWUP_THRESHOLD_DAYS} * INTERVAL '1 day')
-        ${boundFilter}
-        ${ownerFilter}
-        ${accountFilter}
-    `;
-
-    return rows.map((r) => ({
-      userId: r.user_id,
-      conversationKey: r.conversation_key,
-      occurredAt: r.occurred_at,
-      respondsToAt: r.responds_to_at,
-      selfTimeZone: null,
-      isFollowUp: true,
-      participantLinkedinId: r.participant_linkedin_id,
-      selfLinkedinId: r.self_linkedin_id,
-      kind: "LATE_FOLLOW_UP" as const,
-    }));
   }
 
   /**
@@ -290,7 +201,7 @@ export class LateMessageService {
   static async getLateRows(from: Date, to: Date, opts: QueryOpts = {}): Promise<LateRow[]> {
     const [replies, followUps] = await Promise.all([
       this.getLateReplyRows(from, to, opts),
-      this.queryLateFollowUps({ column: "occurred_at", from, to }, opts),
+      LateMessageRepository.queryLateFollowUps({ column: "occurred_at", from, to }, opts),
     ]);
     return [...replies, ...followUps];
   }
@@ -310,6 +221,35 @@ export class LateMessageService {
     }
     return Array.from(buckets.entries())
       .map(([date, v]) => ({ date, ...v }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+  }
+
+  /**
+   * Same bucketing as buildSeries, but ALSO split by owner — one entry per
+   * (date, userId), restricted to `ownerIds`. Pure aggregation over rows
+   * ALREADY fetched by getLateRows — no second query, same principle as
+   * buildSeries/buildTotals above.
+   */
+  static buildSeriesByOwner(
+    rows: LateRow[],
+    ownerIds: string[],
+    granularity: "day" | "week" | "month" = "day",
+  ): Array<{ date: string; userId: string; lateReplies: number; lateFollowUps: number }> {
+    const allowed = new Set(ownerIds);
+    const buckets = new Map<string, { lateReplies: number; lateFollowUps: number }>();
+    for (const r of rows) {
+      if (!allowed.has(r.userId)) continue;
+      const key = `${truncUTC(r.occurredAt, granularity)}::${r.userId}`;
+      const b = buckets.get(key) ?? { lateReplies: 0, lateFollowUps: 0 };
+      if (r.kind === "LATE_REPLY") b.lateReplies += 1;
+      else b.lateFollowUps += 1;
+      buckets.set(key, b);
+    }
+    return Array.from(buckets.entries())
+      .map(([key, v]) => {
+        const [date, userId] = key.split("::");
+        return { date, userId, ...v };
+      })
       .sort((a, b) => a.date.localeCompare(b.date));
   }
 
@@ -358,6 +298,8 @@ export class LateMessageService {
     userId?: string;
     userIds?: string[];
     selfLinkedinId?: string;
+    selfLinkedinIds?: string[];
+    kind?: "LATE_REPLY" | "LATE_FOLLOW_UP";
     from: Date;
     to: Date;
   }): Promise<{
@@ -380,6 +322,7 @@ export class LateMessageService {
         userId: params.userId,
         restrictUserIds: params.userIds,
         selfLinkedinId: params.selfLinkedinId,
+        selfLinkedinIds: params.selfLinkedinIds,
       })
     ).sort((a, b) => b.occurredAt.getTime() - a.occurredAt.getTime());
 
@@ -390,7 +333,8 @@ export class LateMessageService {
       const key = `${r.userId}:${r.conversationKey}`;
       if (!dedupedByConversation.has(key)) dedupedByConversation.set(key, r);
     }
-    const rows = Array.from(dedupedByConversation.values());
+    const deduped = Array.from(dedupedByConversation.values());
+    const rows = params.kind ? deduped.filter((r) => r.kind === params.kind) : deduped;
 
     const total = rows.length;
     const page_ = rows.slice((page - 1) * limit, (page - 1) * limit + limit);
@@ -400,20 +344,7 @@ export class LateMessageService {
     const pairs = Array.from(
       new Map(page_.map((r) => [`${r.userId}:${r.conversationKey}`, r])).values(),
     );
-    const activities = pairs.length
-      ? await prisma.messageActivity.findMany({
-          where: {
-            OR: pairs.map((r) => ({ userId: r.userId, conversationKey: r.conversationKey })),
-          },
-          select: {
-            userId: true,
-            conversationKey: true,
-            participantName: true,
-            participantProfileUrl: true,
-            selfName: true,
-          },
-        })
-      : [];
+    const activities = await LateMessageRepository.findActivityIdentities(pairs);
     const byKey = new Map(
       activities.map((a) => [`${a.userId}:${a.conversationKey}`, a]),
     );
@@ -448,7 +379,7 @@ export class LateMessageService {
    * qualify, not the full SENT-with-a-response history.
    */
   static async getFollowUpHistory(opts: QueryOpts): Promise<LateRow[]> {
-    return this.queryLateFollowUps(null, opts);
+    return LateMessageRepository.queryLateFollowUps(null, opts);
   }
 
   /**
@@ -470,7 +401,7 @@ export class LateMessageService {
   ): Promise<LateRow[]> {
     const respondsFrom = new Date(deadlineFrom.getTime() - LATE_FOLLOWUP_THRESHOLD_DAYS * DAY_MS);
     const respondsTo = new Date(deadlineTo.getTime() - LATE_FOLLOWUP_THRESHOLD_DAYS * DAY_MS);
-    return this.queryLateFollowUps(
+    return LateMessageRepository.queryLateFollowUps(
       { column: "responds_to_at", from: respondsFrom, to: respondsTo },
       opts,
     );

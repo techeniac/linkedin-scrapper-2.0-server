@@ -1,7 +1,6 @@
 // src/services/messageActivityService.ts
 import { Prisma } from "@prisma/client";
-import { randomUUID } from "crypto";
-import prisma from "../config/prisma";
+import { MessageActivityRepository } from "../repositories/messageActivityRepository";
 
 /**
  * Per-user LinkedIn messaging metrics, one row per conversation.
@@ -13,6 +12,10 @@ import prisma from "../config/prisma";
  *   - replied       : conversations where the other party answered
  *   - followUps     : re-pings the user sent with no reply in between
  *   - conversations : threads with >2 messages and both sides participating
+ *
+ * All Prisma/raw-SQL access lives in MessageActivityRepository — this service
+ * holds only the business decisions (parsing input, which columns are
+ * sortable, how to build the search/date filter).
  */
 
 export interface MessageActivityInput {
@@ -64,6 +67,7 @@ export interface ListMessagesParams {
   userId?: string;
   userIds?: string[]; // restrict to a set of owners (used when no single userId)
   selfLinkedinId?: string; // the logged-in LinkedIn account that sent the messages
+  selfLinkedinIds?: string[]; // multi-select account filter; takes precedence over selfLinkedinId
   hasReply?: boolean;
   isConversation?: boolean;
   lastFrom?: Date;
@@ -92,54 +96,29 @@ export class MessageActivityService {
    *
    * Postgres LEAST/GREATEST ignore NULLs (returning NULL only when every
    * argument is NULL), which is exactly the behaviour we want for the dates.
-   *
-   * Raw SQL rather than prisma.upsert() because Prisma cannot express
-   * GREATEST/LEAST against the existing row inside an update.
    */
   static async upsert(
     userId: string,
     input: MessageActivityInput,
   ): Promise<void> {
-    const firstAt = toDate(input.firstMessageAt);
-    const lastAt = toDate(input.lastMessageAt);
-
-    // `id` has no database-level default (Prisma generates uuids client-side),
-    // and `updated_at` is NOT NULL without a default, so both must be supplied.
-    await prisma.$executeRaw`
-      INSERT INTO message_activity (
-        id, user_id, conversation_key,
-        participant_linkedin_id, participant_name, participant_profile_url,
-        self_linkedin_id, self_name, self_profile_url,
-        sent_count, received_count, follow_up_count, read_count,
-        has_reply, is_conversation,
-        first_message_at, last_message_at,
-        created_at, updated_at
-      ) VALUES (
-        ${randomUUID()}, ${userId}, ${input.conversationKey},
-        ${input.participantLinkedinId ?? null}, ${input.participantName ?? null}, ${input.participantProfileUrl ?? null},
-        ${input.selfLinkedinId ?? null}, ${input.selfName ?? null}, ${input.selfProfileUrl ?? null},
-        ${input.sentCount}, ${input.receivedCount}, ${input.followUpCount}, ${input.readCount},
-        ${input.hasReply}, ${input.isConversation},
-        ${firstAt}, ${lastAt},
-        NOW(), NOW()
-      )
-      ON CONFLICT (user_id, conversation_key) DO UPDATE SET
-        sent_count       = GREATEST(message_activity.sent_count,      EXCLUDED.sent_count),
-        received_count   = GREATEST(message_activity.received_count,  EXCLUDED.received_count),
-        follow_up_count  = GREATEST(message_activity.follow_up_count, EXCLUDED.follow_up_count),
-        read_count       = GREATEST(message_activity.read_count,      EXCLUDED.read_count),
-        has_reply        = message_activity.has_reply      OR EXCLUDED.has_reply,
-        is_conversation  = message_activity.is_conversation OR EXCLUDED.is_conversation,
-        first_message_at = LEAST(message_activity.first_message_at,   EXCLUDED.first_message_at),
-        last_message_at  = GREATEST(message_activity.last_message_at, EXCLUDED.last_message_at),
-        participant_linkedin_id = COALESCE(EXCLUDED.participant_linkedin_id, message_activity.participant_linkedin_id),
-        participant_name        = COALESCE(EXCLUDED.participant_name,        message_activity.participant_name),
-        participant_profile_url = COALESCE(EXCLUDED.participant_profile_url, message_activity.participant_profile_url),
-        self_linkedin_id        = COALESCE(EXCLUDED.self_linkedin_id,        message_activity.self_linkedin_id),
-        self_name               = COALESCE(EXCLUDED.self_name,               message_activity.self_name),
-        self_profile_url        = COALESCE(EXCLUDED.self_profile_url,        message_activity.self_profile_url),
-        updated_at = NOW()
-    `;
+    await MessageActivityRepository.upsert({
+      userId,
+      conversationKey: input.conversationKey,
+      participantLinkedinId: input.participantLinkedinId ?? null,
+      participantName: input.participantName ?? null,
+      participantProfileUrl: input.participantProfileUrl ?? null,
+      selfLinkedinId: input.selfLinkedinId ?? null,
+      selfName: input.selfName ?? null,
+      selfProfileUrl: input.selfProfileUrl ?? null,
+      sentCount: input.sentCount,
+      receivedCount: input.receivedCount,
+      followUpCount: input.followUpCount,
+      readCount: input.readCount,
+      hasReply: input.hasReply,
+      isConversation: input.isConversation,
+      firstMessageAt: toDate(input.firstMessageAt),
+      lastMessageAt: toDate(input.lastMessageAt),
+    });
   }
 
   /**
@@ -150,42 +129,14 @@ export class MessageActivityService {
     userId?: string,
     restrictUserIds?: string[],
   ): Promise<MessageStats> {
-    // Single round trip: sums + conditional counts in one query (::int casts so
-    // Postgres bigints come back as plain numbers, not BigInt).
-    const rows = await prisma.$queryRaw<
-      Array<{
-        sent: number;
-        read: number;
-        followups: number;
-        replied: number;
-        received: number;
-        conversations: number;
-      }>
-    >`
-      SELECT
-        COALESCE(SUM(sent_count), 0)::int      AS sent,
-        COALESCE(SUM(read_count), 0)::int      AS read,
-        COALESCE(SUM(follow_up_count), 0)::int AS followups,
-        COUNT(*) FILTER (WHERE has_reply)::int AS replied,
-        COALESCE(SUM(received_count), 0)::int  AS received,
-        COUNT(*) FILTER (WHERE is_conversation)::int AS conversations
-      FROM message_activity
-      ${
-        userId
-          ? Prisma.sql`WHERE user_id = ${userId}`
-          : restrictUserIds
-            ? Prisma.sql`WHERE user_id = ANY(${restrictUserIds})`
-            : Prisma.empty
-      }
-    `;
-    const r = rows[0];
+    const r = await MessageActivityRepository.getStats(userId, restrictUserIds);
     return {
-      sent: r?.sent ?? 0,
-      read: r?.read ?? 0,
-      followUps: r?.followups ?? 0,
-      replied: r?.replied ?? 0,
-      received: r?.received ?? 0,
-      conversations: r?.conversations ?? 0,
+      sent: r.sent,
+      read: r.read,
+      followUps: r.followups,
+      replied: r.replied,
+      received: r.received,
+      conversations: r.conversations,
     };
   }
 
@@ -193,54 +144,23 @@ export class MessageActivityService {
   static async getUserAndGlobalStats(
     userId: string,
   ): Promise<{ user: MessageStats; global: MessageStats }> {
-    const rows = await prisma.$queryRaw<
-      Array<{
-        user_sent: number;
-        user_read: number;
-        user_followups: number;
-        user_replied: number;
-        user_received: number;
-        user_conversations: number;
-        global_sent: number;
-        global_read: number;
-        global_followups: number;
-        global_replied: number;
-        global_received: number;
-        global_conversations: number;
-      }>
-    >`
-      SELECT
-        COALESCE(SUM(sent_count)      FILTER (WHERE user_id = ${userId}), 0)::int AS user_sent,
-        COALESCE(SUM(read_count)      FILTER (WHERE user_id = ${userId}), 0)::int AS user_read,
-        COALESCE(SUM(follow_up_count) FILTER (WHERE user_id = ${userId}), 0)::int AS user_followups,
-        COUNT(*) FILTER (WHERE user_id = ${userId} AND has_reply)::int AS user_replied,
-        COALESCE(SUM(received_count) FILTER (WHERE user_id = ${userId}), 0)::int  AS user_received,
-        COUNT(*) FILTER (WHERE user_id = ${userId} AND is_conversation)::int AS user_conversations,
-        COALESCE(SUM(sent_count), 0)::int      AS global_sent,
-        COALESCE(SUM(read_count), 0)::int      AS global_read,
-        COALESCE(SUM(follow_up_count), 0)::int AS global_followups,
-        COUNT(*) FILTER (WHERE has_reply)::int AS global_replied,
-        COALESCE(SUM(received_count), 0)::int  AS global_received,
-        COUNT(*) FILTER (WHERE is_conversation)::int AS global_conversations
-      FROM message_activity
-    `;
-    const r = rows[0];
+    const r = await MessageActivityRepository.getUserAndGlobalStats(userId);
     return {
       user: {
-        sent: r?.user_sent ?? 0,
-        read: r?.user_read ?? 0,
-        followUps: r?.user_followups ?? 0,
-        replied: r?.user_replied ?? 0,
-        received: r?.user_received ?? 0,
-        conversations: r?.user_conversations ?? 0,
+        sent: r.user_sent,
+        read: r.user_read,
+        followUps: r.user_followups,
+        replied: r.user_replied,
+        received: r.user_received,
+        conversations: r.user_conversations,
       },
       global: {
-        sent: r?.global_sent ?? 0,
-        read: r?.global_read ?? 0,
-        followUps: r?.global_followups ?? 0,
-        replied: r?.global_replied ?? 0,
-        received: r?.global_received ?? 0,
-        conversations: r?.global_conversations ?? 0,
+        sent: r.global_sent,
+        read: r.global_read,
+        followUps: r.global_followups,
+        replied: r.global_replied,
+        received: r.global_received,
+        conversations: r.global_conversations,
       },
     };
   }
@@ -271,7 +191,8 @@ export class MessageActivityService {
     const where: Prisma.MessageActivityWhereInput = {};
     if (p.userId) where.userId = p.userId;
     else if (p.userIds) where.userId = { in: p.userIds };
-    if (p.selfLinkedinId) where.selfLinkedinId = p.selfLinkedinId;
+    if (p.selfLinkedinIds?.length) where.selfLinkedinId = { in: p.selfLinkedinIds };
+    else if (p.selfLinkedinId) where.selfLinkedinId = p.selfLinkedinId;
     if (typeof p.hasReply === "boolean") where.hasReply = p.hasReply;
     if (typeof p.isConversation === "boolean") where.isConversation = p.isConversation;
     if (p.lastFrom || p.lastTo) {
@@ -286,32 +207,12 @@ export class MessageActivityService {
       ];
     }
 
-    const [data, total] = await prisma.$transaction([
-      prisma.messageActivity.findMany({
-        where,
-        orderBy: { [sortBy]: sortOrder } as Prisma.MessageActivityOrderByWithRelationInput,
-        skip: (page - 1) * limit,
-        take: limit,
-        select: {
-          id: true,
-          userId: true, // so the controller can map the owner to its HubSpot name
-          conversationKey: true, // used to build the LinkedIn thread URL
-          participantName: true,
-          participantProfileUrl: true,
-          selfName: true,
-          sentCount: true,
-          receivedCount: true,
-          followUpCount: true,
-          readCount: true,
-          hasReply: true,
-          isConversation: true,
-          firstMessageAt: true,
-          lastMessageAt: true,
-          user: { select: { name: true } }, // owner NAME only (no email while public)
-        },
-      }),
-      prisma.messageActivity.count({ where }),
-    ]);
+    const [data, total] = await MessageActivityRepository.findAndCount(
+      where,
+      { [sortBy]: sortOrder } as Prisma.MessageActivityOrderByWithRelationInput,
+      (page - 1) * limit,
+      limit,
+    );
 
     return {
       data,

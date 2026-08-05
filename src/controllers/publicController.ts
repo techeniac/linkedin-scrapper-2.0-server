@@ -15,23 +15,29 @@ import prisma from "../config/prisma";
 import { successResponse } from "../utils/apiResponse";
 
 type LinkedinAccount = { id: string; name: string | null };
+// Distinct (ownerId, linkedinAccountId) pairs — "which accounts has this
+// owner actually used" — powers the frontend's cascading Group-By filter
+// (narrowing the secondary dropdown to only what co-occurs with the primary
+// selection). Computed from the SAME two scans as the account list below, so
+// this never costs a third DISTINCT query.
+type OwnerAccountPair = { ownerId: string; linkedinAccountId: string };
 
 // Distinct logged-in LinkedIn accounts (the actor on connections / self on
 // messages) across the given owners — powers the "LinkedIn account" filter.
 // Two DISTINCT scans, so the result is cached (below) rather than run per request.
 const loadLinkedinAccounts = async (
   ownerIds: string[],
-): Promise<LinkedinAccount[]> => {
+): Promise<{ accounts: LinkedinAccount[]; pairs: OwnerAccountPair[] }> => {
   const [actors, selves] = await Promise.all([
     prisma.connectionRequest.findMany({
       where: { userId: { in: ownerIds }, actorLinkedinId: { not: null } },
-      select: { actorLinkedinId: true, actorName: true },
-      distinct: ["actorLinkedinId"],
+      select: { userId: true, actorLinkedinId: true, actorName: true },
+      distinct: ["userId", "actorLinkedinId"],
     }),
     prisma.messageActivity.findMany({
       where: { userId: { in: ownerIds }, selfLinkedinId: { not: null } },
-      select: { selfLinkedinId: true, selfName: true },
-      distinct: ["selfLinkedinId"],
+      select: { userId: true, selfLinkedinId: true, selfName: true },
+      distinct: ["userId", "selfLinkedinId"],
     }),
   ]);
 
@@ -43,21 +49,38 @@ const loadLinkedinAccounts = async (
   actors.forEach((a) => add(a.actorLinkedinId, a.actorName));
   selves.forEach((s) => add(s.selfLinkedinId, s.selfName));
 
-  return Array.from(byId.entries())
-    .map(([id, name]) => ({ id, name }))
-    .sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
+  const pairKeys = new Set<string>();
+  const pairs: OwnerAccountPair[] = [];
+  const addPair = (ownerId: string, accountId: string | null) => {
+    if (!accountId) return;
+    const key = `${ownerId}:${accountId}`;
+    if (pairKeys.has(key)) return;
+    pairKeys.add(key);
+    pairs.push({ ownerId, linkedinAccountId: accountId });
+  };
+  actors.forEach((a) => addPair(a.userId, a.actorLinkedinId));
+  selves.forEach((s) => addPair(s.userId, s.selfLinkedinId));
+
+  return {
+    accounts: Array.from(byId.entries())
+      .map(([id, name]) => ({ id, name }))
+      .sort((a, b) => (a.name ?? "").localeCompare(b.name ?? "")),
+    pairs,
+  };
 };
 
 // Stale-while-revalidate cache for the LinkedIn-account list (changes rarely).
 const LA_TTL_MS = 30 * 60 * 1000;
-let laCache: { at: number; data: LinkedinAccount[] } | null = null;
-let laInFlight: Promise<LinkedinAccount[]> | null = null;
+let laCache: { at: number; accounts: LinkedinAccount[]; pairs: OwnerAccountPair[] } | null = null;
+let laInFlight: Promise<{ accounts: LinkedinAccount[]; pairs: OwnerAccountPair[] }> | null = null;
 
-const refreshLinkedinAccounts = (ownerIds: string[]): Promise<LinkedinAccount[]> => {
+const refreshLinkedinAccounts = (
+  ownerIds: string[],
+): Promise<{ accounts: LinkedinAccount[]; pairs: OwnerAccountPair[] }> => {
   if (!laInFlight) {
     laInFlight = loadLinkedinAccounts(ownerIds)
       .then((data) => {
-        laCache = { at: Date.now(), data };
+        laCache = { at: Date.now(), ...data };
         return data;
       })
       .finally(() => {
@@ -67,15 +90,18 @@ const refreshLinkedinAccounts = (ownerIds: string[]): Promise<LinkedinAccount[]>
   return laInFlight;
 };
 
-const getLinkedinAccounts = async (
+const getLinkedinAccountsData = async (
   ownerIds: string[],
-): Promise<LinkedinAccount[]> => {
+): Promise<{ accounts: LinkedinAccount[]; pairs: OwnerAccountPair[] }> => {
   if (!laCache) return refreshLinkedinAccounts(ownerIds); // cold — block once
   if (Date.now() - laCache.at >= LA_TTL_MS) {
     void refreshLinkedinAccounts(ownerIds).catch(() => {}); // stale — refresh in bg
   }
-  return laCache.data; // warm — instant
+  return laCache; // warm — instant
 };
+
+const getLinkedinAccounts = async (ownerIds: string[]): Promise<LinkedinAccount[]> =>
+  (await getLinkedinAccountsData(ownerIds)).accounts;
 
 // These endpoints are intentionally UNAUTHENTICATED (see publicRoutes.ts): they
 // serve read-only reporting data to the Chitragupt frontend (no login yet).
@@ -105,11 +131,25 @@ const toBool = (v: unknown): boolean | undefined => {
 const toSortOrder = (v: unknown): "asc" | "desc" =>
   toStr(v) === "asc" ? "asc" : "desc";
 
+// Accepts either repeated query params (?ids=a&ids=b), a comma-separated
+// value (?ids=a,b), or a single value — Express gives an array for the first
+// form and a string for the other two.
+const toStrArray = (v: unknown): string[] => {
+  const raw = Array.isArray(v) ? v : typeof v === "string" ? v.split(",") : [];
+  return raw.map((s) => String(s).trim()).filter(Boolean);
+};
+
 // Only allow filtering by an owner who is actually a connected owner.
 const pickOwner = (v: unknown, ownerIds: string[]): string | undefined => {
   const id = toStr(v);
   return id && ownerIds.includes(id) ? id : undefined;
 };
+
+// Multi-select counterpart to pickOwner — every requested id must be a real
+// connected owner, or it's silently dropped (never lets a caller probe an
+// arbitrary user id through this public, unauthenticated router).
+const pickOwners = (v: unknown, ownerIds: string[]): string[] =>
+  toStrArray(v).filter((id) => ownerIds.includes(id));
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -136,8 +176,10 @@ export const getFilters = async (
 ): Promise<void> => {
   try {
     const owners = await getConnectedOwners();
-    const linkedinAccounts = await getLinkedinAccounts(owners.map((o) => o.id));
-    successResponse(res, { users: owners, linkedinAccounts }, "Filters retrieved");
+    const { accounts: linkedinAccounts, pairs: ownerAccounts } = await getLinkedinAccountsData(
+      owners.map((o) => o.id),
+    );
+    successResponse(res, { users: owners, linkedinAccounts, ownerAccounts }, "Filters retrieved");
   } catch (error) {
     next(error);
   }
@@ -167,10 +209,30 @@ export const getSummary = async (
     const ownerIds = owners.map((o) => o.id);
     const userId = pickOwner(req.query.userId, ownerIds);
     const linkedinId = toStr(req.query.linkedinId);
+    const linkedinIds = toStrArray(req.query.linkedinAccountIds);
+
+    // Connections report's multi-select Status filter — narrows the chart to
+    // a set of statuses' activity (see
+    // ConnectionEventService.getSeries/getSeriesByOwner). Only ever affects
+    // the connections series; every other report's series ignores it.
+    const connectionStatuses = toStrArray(req.query.connectionStatuses)
+      .map((s) => s.toUpperCase())
+      .filter((s): s is ConnectionRequestStatus => s in ConnectionRequestStatus);
+
+    // Multi-select owner breakdown — see the 4 services' getSeriesByOwner /
+    // buildSeriesByOwner. Opt-in: only requested (and only computed) when the
+    // client actually asks for it, so the common single/no-owner case never
+    // pays for the extra grouping.
+    const breakdownOwnerIds = pickOwners(req.query.ownerIds, ownerIds);
 
     // Shared scope for the message-derived reports (Late Messages, Missed
     // Follow-Up) — both filter identically, so define once.
-    const messageOpts = { userId, restrictUserIds: ownerIds, selfLinkedinId: linkedinId };
+    const messageOpts = {
+      userId,
+      restrictUserIds: ownerIds,
+      selfLinkedinId: linkedinId,
+      selfLinkedinIds: linkedinIds,
+    };
 
     const [
       connectionsSeries,
@@ -182,6 +244,8 @@ export const getSummary = async (
       missedBacklog,
       missedCrossings,
       linkedinAccounts,
+      connectionsActivitySeriesByOwner,
+      messagesSeriesByOwner,
     ] = await Promise.all([
       // COHORT: of requests sent in each bucket, their status now.
       ConnectionService.getSeries(userId, from, to, ownerIds, linkedinId, granularity),
@@ -193,12 +257,15 @@ export const getSummary = async (
         userId,
         restrictUserIds: ownerIds,
         actorLinkedinId: linkedinId,
+        actorLinkedinIds: linkedinIds,
         granularity,
+        statuses: connectionStatuses.length ? connectionStatuses : undefined,
       }),
       ConnectionEventService.getTotals(from, to, {
         userId,
         restrictUserIds: ownerIds,
         actorLinkedinId: linkedinId,
+        actorLinkedinIds: linkedinIds,
       }),
       // EVENT LOG, not the conversation-aggregate table: each message is
       // bucketed by when it actually happened, so a long-running conversation's
@@ -207,6 +274,7 @@ export const getSummary = async (
         userId,
         restrictUserIds: ownerIds,
         selfLinkedinId: linkedinId,
+        selfLinkedinIds: linkedinIds,
         granularity,
       }),
       // Windowed totals for the report's KPI cards, mirroring connectionsTotals.
@@ -214,6 +282,7 @@ export const getSummary = async (
         userId,
         restrictUserIds: ownerIds,
         selfLinkedinId: linkedinId,
+        selfLinkedinIds: linkedinIds,
       }),
       // Late Messages report: fetched ONCE here — series and totals are both
       // pure derivations of the same row set (see buildSeries/buildTotals
@@ -226,6 +295,22 @@ export const getSummary = async (
       MissedFollowUpService.getBacklog(messageOpts, now),
       LateMessageService.getFollowUpDeadlineCrossings(from, to, messageOpts),
       getLinkedinAccounts(ownerIds),
+      // Per-owner breakdown for the report chart's stacked segments — only
+      // actually queried when the client asked for a breakdown (see
+      // breakdownOwnerIds above); each ByOwner method itself already
+      // short-circuits to [] on an empty id list, so this never adds a real
+      // query to the common case.
+      ConnectionEventService.getSeriesByOwner(from, to, breakdownOwnerIds, {
+        actorLinkedinId: linkedinId,
+        actorLinkedinIds: linkedinIds,
+        granularity,
+        statuses: connectionStatuses.length ? connectionStatuses : undefined,
+      }),
+      MessageEventService.getSeriesByOwner(from, to, breakdownOwnerIds, {
+        selfLinkedinId: linkedinId,
+        selfLinkedinIds: linkedinIds,
+        granularity,
+      }),
     ]);
 
     const lateSeries = LateMessageService.buildSeries(lateRows, granularity);
@@ -236,6 +321,19 @@ export const getSummary = async (
     const missedFollowUpSeries = MissedFollowUpService.buildSeries(missedBacklog, missedCrossings, from, to);
     const missedFollowUpNow = missedBacklog.length;
 
+    // Same per-owner breakdown principle for Late Messages / Missed Follow-Up
+    // — both are pure re-aggregations of the rows already fetched above, so
+    // this is free (no additional DB round trip) regardless of whether a
+    // breakdown was requested.
+    const lateSeriesByOwner = LateMessageService.buildSeriesByOwner(lateRows, breakdownOwnerIds, granularity);
+    const missedFollowUpSeriesByOwner = MissedFollowUpService.buildSeriesByOwner(
+      missedBacklog,
+      missedCrossings,
+      breakdownOwnerIds,
+      from,
+      to,
+    );
+
     // Pending is a SNAPSHOT, not a time series — "how many are outstanding
     // right now" — so it comes from current state rather than the event log.
     const pendingNow = await ConnectionService.getStats(userId, ownerIds);
@@ -245,12 +343,16 @@ export const getSummary = async (
       {
         connectionsSeries,
         connectionsActivitySeries,
+        connectionsActivitySeriesByOwner,
         connectionsTotals: { ...connectionsTotals, pending: pendingNow.pending },
         messagesSeries,
+        messagesSeriesByOwner,
         messagesTotals,
         lateSeries,
+        lateSeriesByOwner,
         lateTotals,
         missedFollowUpSeries,
+        missedFollowUpSeriesByOwner,
         missedFollowUpNow,
         users: owners,
         linkedinAccounts,
@@ -260,6 +362,33 @@ export const getSummary = async (
   } catch (error) {
     next(error);
   }
+};
+
+// Resolves the owner scope for a list endpoint: a single validated userId
+// (from ?userId), else a validated multi-select subset (from ?userIds), else
+// every connected owner (today's existing "no filter" behaviour).
+const resolveOwnerScope = (
+  req: Request,
+  ownerIds: string[],
+): { userId: string | undefined; userIds: string[] | undefined } => {
+  const userId = pickOwner(req.query.userId, ownerIds);
+  if (userId) return { userId, userIds: undefined };
+  const userIds = pickOwners(req.query.userIds, ownerIds);
+  return { userId: undefined, userIds: userIds.length > 0 ? userIds : ownerIds };
+};
+
+// Same shape for the LinkedIn-account dimension: a single value (?linkedinId)
+// takes precedence over a multi-select (?linkedinAccountIds); neither means
+// no account filter at all (not validated against a master list, same as the
+// existing singular-only behaviour — these only ever narrow an already
+// owner-scoped query).
+const resolveAccountScope = (
+  req: Request,
+): { accountId: string | undefined; accountIds: string[] | undefined } => {
+  const accountId = toStr(req.query.linkedinId);
+  if (accountId) return { accountId, accountIds: undefined };
+  const accountIds = toStrArray(req.query.linkedinAccountIds);
+  return { accountId: undefined, accountIds: accountIds.length > 0 ? accountIds : undefined };
 };
 
 // Replace each row's owner name with the HubSpot name (fallback to DB name).
@@ -302,13 +431,12 @@ export const getConnections = async (
       getConnectedOwnerIds(),
       getConnectedOwnerNameMap(),
     ]);
-    const userId = pickOwner(req.query.userId, ownerIds);
+    const { userId, userIds } = resolveOwnerScope(req, ownerIds);
+    const { accountId, accountIds } = resolveAccountScope(req);
 
-    const statusRaw = toStr(req.query.status)?.toUpperCase();
-    const status =
-      statusRaw && statusRaw in ConnectionRequestStatus
-        ? (statusRaw as ConnectionRequestStatus)
-        : undefined;
+    const statuses = toStrArray(req.query.statuses)
+      .map((s) => s.toUpperCase())
+      .filter((s): s is ConnectionRequestStatus => s in ConnectionRequestStatus);
 
     const result = await ConnectionService.list({
       page: toInt(req.query.page, 1),
@@ -317,9 +445,10 @@ export const getConnections = async (
       sortOrder: toSortOrder(req.query.sortOrder),
       search: toStr(req.query.search),
       userId,
-      userIds: userId ? undefined : ownerIds,
-      actorLinkedinId: toStr(req.query.linkedinId),
-      status,
+      userIds,
+      actorLinkedinId: accountId,
+      actorLinkedinIds: accountIds,
+      statuses: statuses.length ? statuses : undefined,
       sentFrom: toDate(req.query.sentFrom),
       sentTo: toDate(req.query.sentTo),
     });
@@ -345,7 +474,8 @@ export const getMessages = async (
       getConnectedOwnerIds(),
       getConnectedOwnerNameMap(),
     ]);
-    const userId = pickOwner(req.query.userId, ownerIds);
+    const { userId, userIds } = resolveOwnerScope(req, ownerIds);
+    const { accountId, accountIds } = resolveAccountScope(req);
 
     const result = await MessageActivityService.list({
       page: toInt(req.query.page, 1),
@@ -354,8 +484,9 @@ export const getMessages = async (
       sortOrder: toSortOrder(req.query.sortOrder),
       search: toStr(req.query.search),
       userId,
-      userIds: userId ? undefined : ownerIds,
-      selfLinkedinId: toStr(req.query.linkedinId),
+      userIds,
+      selfLinkedinId: accountId,
+      selfLinkedinIds: accountIds,
       hasReply: toBool(req.query.hasReply),
       isConversation: toBool(req.query.isConversation),
       lastFrom: toDate(req.query.lastFrom),
@@ -401,20 +532,29 @@ export const getLateMessages = async (
       getConnectedOwnerIds(),
       getConnectedOwnerNameMap(),
     ]);
-    const userId = pickOwner(req.query.userId, ownerIds);
+    const { userId, userIds } = resolveOwnerScope(req, ownerIds);
+    const { accountId, accountIds } = resolveAccountScope(req);
+    const kindRaw = toStr(req.query.kind)?.toUpperCase();
+    const kind = kindRaw === "LATE_REPLY" || kindRaw === "LATE_FOLLOW_UP" ? kindRaw : undefined;
 
     const result = await LateMessageService.list({
       page: toInt(req.query.page, 1),
       limit: toInt(req.query.limit, 10),
       userId,
-      userIds: userId ? undefined : ownerIds,
-      selfLinkedinId: toStr(req.query.linkedinId),
+      userIds,
+      selfLinkedinId: accountId,
+      selfLinkedinIds: accountIds,
+      kind,
       from,
       to,
     });
 
     // Table columns: Name | LinkedIn URL | Sales Person | LinkedIn Profile.
+    // `id` is synthesized (this report has no single-row primary key of its
+    // own — a late instance is identified by which conversation, for which
+    // owner) so the frontend has a stable React key.
     const data = result.data.map((r) => ({
+      id: `${r.userId}:${r.conversationKey}:${r.occurredAt.toISOString()}`,
       name: r.participantName,
       linkedinUrl: r.participantProfileUrl,
       user: { name: nameMap.get(r.userId) ?? null }, // Sales Person
@@ -447,20 +587,28 @@ export const getMissedFollowUps = async (
       getConnectedOwnerIds(),
       getConnectedOwnerNameMap(),
     ]);
-    const userId = pickOwner(req.query.userId, ownerIds);
+    const { userId, userIds } = resolveOwnerScope(req, ownerIds);
+    const { accountId, accountIds } = resolveAccountScope(req);
+    const statusRaw = toStr(req.query.status)?.toUpperCase();
+    const status = statusRaw === "STILL_MISSING" || statusRaw === "RESOLVED_LATE" ? statusRaw : undefined;
 
     const result = await MissedFollowUpService.listHistory({
       page: toInt(req.query.page, 1),
       limit: toInt(req.query.limit, 10),
       userId,
-      userIds: userId ? undefined : ownerIds,
-      selfLinkedinId: toStr(req.query.linkedinId),
+      userIds,
+      selfLinkedinId: accountId,
+      selfLinkedinIds: accountIds,
+      status,
       now,
     });
 
     // Table columns: Name | LinkedIn URL | Sales Person | LinkedIn Profile,
     // plus Status | Missed Since | Follow-Up Sent | Days Late for the history.
+    // `id` is synthesized (one row per conversation's CURRENT status, not a
+    // single-row primary key) so the frontend has a stable React key.
     const data = result.data.map((r) => ({
+      id: `${r.userId}:${r.conversationKey}`,
       name: r.participantName,
       linkedinUrl: r.participantProfileUrl,
       user: { name: nameMap.get(r.userId) ?? null }, // Sales Person
