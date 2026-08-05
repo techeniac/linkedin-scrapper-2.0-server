@@ -47,7 +47,9 @@ router.post(
       .notEmpty()
       .withMessage("targetLinkedinId is required"),
     body("status")
-      .isIn(["PENDING", "ACCEPTED", "NOT_ACCEPTED", "WITHDRAWN"])
+      // NOT_ACCEPTED still accepted so an older extension build doesn't start
+      // failing validation; it is no longer written by anything.
+      .isIn(["PENDING", "ACCEPTED", "NOT_ACCEPTED", "WITHDRAWN", "EXPIRED"])
       .withMessage("status must be a valid ConnectionRequestStatus"),
     validate,
   ],
@@ -66,7 +68,16 @@ router.post(
     body("connected.*.name").optional().isString(),
     body("connected.*.connectedAt").optional().isString(),
     body("sentInvitationsFetched").isBoolean(),
-    body("coverageFloor").optional().isString(),
+    // True only when the Sent-list walk reached the end. Optional so older
+    // extension builds keep working — treated as false (partial) when absent,
+    // which blocks any EXPIRED resolution.
+    body("sentListComplete").optional().isBoolean(),
+    // { nullable: true }: the client sends coverageFloor: null on purpose when
+    // the connections list was FULLY fetched (see connectionSync.ts) — that's
+    // the success case, not an edge case. Without nullable:true, express-
+    // validator's optional() only skips undefined, not an explicit null, so
+    // this rejected every fully-covered sync with "Validation failed".
+    body("coverageFloor").optional({ nullable: true }).isString(),
     body("actorLinkedinId").optional().isString(),
     validate,
   ],

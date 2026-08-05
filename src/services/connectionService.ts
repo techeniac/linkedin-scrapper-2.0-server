@@ -1,6 +1,7 @@
 // src/services/connectionService.ts
-import { ConnectionRequestStatus, Prisma } from "@prisma/client";
-import prisma from "../config/prisma";
+import { ConnectionEventSource, ConnectionRequestStatus, Prisma } from "@prisma/client";
+import { ConnectionRepository } from "../repositories/connectionRepository";
+import { ConnectionEventService, estimateExpiryDate } from "./connectionEventService";
 
 // Read params for the public, paginated connections list.
 export interface ListConnectionsParams {
@@ -12,7 +13,8 @@ export interface ListConnectionsParams {
   userId?: string;
   userIds?: string[]; // restrict to a set of owners (used when no single userId)
   actorLinkedinId?: string; // the logged-in LinkedIn account that sent the request
-  status?: ConnectionRequestStatus;
+  actorLinkedinIds?: string[]; // multi-select account filter; takes precedence over actorLinkedinId
+  statuses?: ConnectionRequestStatus[]; // multi-select Status filter
   sentFrom?: Date;
   sentTo?: Date;
 }
@@ -20,13 +22,28 @@ export interface ListConnectionsParams {
 /**
  * LinkedIn connection-request tracking.
  *
- * We record one row per request a user sends (unique per user+target). LinkedIn
- * only reliably surfaces "sent" and "pending"; the other states are derived:
- *   - ACCEPTED     : the target later resolves to a 1st-degree connection
- *   - WITHDRAWN    : the user retracts the invite
- *   - NOT_ACCEPTED : declined / ignored / expired (set by reconciliation)
+ * One row per request a user sends (unique per user+target). LinkedIn's Sent
+ * list contains ONLY outstanding invitations and labels every one "Pending";
+ * resolved ones simply vanish. So the statuses are derived by elimination:
+ *   - PENDING   : present in LinkedIn's Sent list
+ *   - ACCEPTED  : absent, and the target is now a 1st-degree connection
+ *   - WITHDRAWN : absent, and we intercepted the user retracting it
+ *   - EXPIRED   : absent, and neither of the above
  *
- * "Sent" is therefore the total row count; the four statuses partition it.
+ * EXPIRED therefore also absorbs declines: LinkedIn never notifies a sender
+ * that an invitation was rejected, and the API that does distinguish REJECTED
+ * from EXPIRED is partner-gated. Both simply disappear, identically.
+ *
+ * NOT_ACCEPTED is deprecated and never written; it survives only so legacy rows
+ * and historical events stay readable.
+ *
+ * This table is the CURRENT-STATE projection and is deliberately lossy — a
+ * re-send re-opens the row and overwrites its previous outcome. Historical
+ * counts must come from ConnectionRequestEvent (see connectionEventService).
+ *
+ * All Prisma access lives in ConnectionRepository — this service holds only
+ * the business decisions (reconcile's accept/expire rules, which columns are
+ * sortable, how to build the search/date filter for list()).
  */
 
 export interface TrackSentInput {
@@ -43,8 +60,10 @@ export interface ConnectionStats {
   sent: number;
   pending: number;
   accepted: number;
-  notAccepted: number;
   withdrawn: number;
+  expired: number;
+  /** DEPRECATED: superseded by `expired`. Always 0 for new data. */
+  notAccepted: number;
 }
 
 // Payload from the extension's connections snapshot (LinkedIn sent-invitations +
@@ -58,21 +77,30 @@ export interface ReconcileInput {
     name?: string | null;
     connectedAt?: string | null; // ISO or epoch-ms string
   }[];
-  // False when the sent-invitations fetch failed — then we NEVER mark
-  // NOT_ACCEPTED (can't distinguish resolved-not-accepted from still-pending).
+  // False when the sent-invitations fetch failed — then we NEVER resolve a row
+  // to EXPIRED (can't distinguish resolved from still-pending).
   sentInvitationsFetched: boolean;
+  // True only when the walk of LinkedIn's Sent list reached the end (an empty
+  // page) rather than stopping at a page cap or a parse failure. A PARTIAL walk
+  // looks exactly like "everything disappeared", so it must never resolve
+  // anything — treat a missing flag as partial.
+  sentListComplete?: boolean;
   // Oldest connectedAt in the fetched connections page; null when the whole
   // connections list was fetched (full coverage). Rows sent before this floor
-  // aren't marked NOT_ACCEPTED (a possible acceptance is outside our window).
+  // aren't marked EXPIRED (a possible acceptance is outside our window).
   coverageFloor?: string | null;
-  // The LinkedIn account performing the sync; scopes NOT_ACCEPTED to rows sent
+  // The LinkedIn account performing the sync; scopes resolution to rows sent
   // from this actor (or with an unknown actor) to avoid cross-account errors.
   actorLinkedinId?: string | null;
 }
 
 export interface ReconcileResult {
   accepted: number;
-  notAccepted: number;
+  expired: number;
+  /** Absent for the first time — awaiting a second confirming walk. */
+  newlyAbsent: number;
+  /** Were absent, showed up again — absence marker cleared, no harm done. */
+  reappeared: number;
   stillPending: number;
 }
 
@@ -106,56 +134,28 @@ export class ConnectionService {
       actorPublicIdentifier,
     } = input;
 
-    const existing = await prisma.connectionRequest.findUnique({
-      where: {
-        userId_targetLinkedinId: { userId, targetLinkedinId },
-      },
-      select: { id: true, status: true },
-    });
-
-    if (!existing) {
-      await prisma.connectionRequest.create({
-        data: {
-          userId,
-          targetLinkedinId,
-          targetProfileUrl: targetProfileUrl ?? null,
-          targetName: targetName ?? null,
-          actorLinkedinId: actorLinkedinId ?? null,
-          actorName: actorName ?? null,
-          actorPublicIdentifier: actorPublicIdentifier ?? null,
-          status: ConnectionRequestStatus.PENDING,
-        },
-      });
-      return;
-    }
-
-    // Don't clobber an already-accepted connection. For any other prior state
-    // (withdrawn / not-accepted / still pending) a new send re-opens it. Actor
-    // details are refreshed to the account that sent this latest request.
-    const reopen = existing.status !== ConnectionRequestStatus.ACCEPTED;
-    await prisma.connectionRequest.update({
-      where: { id: existing.id },
-      data: {
-        ...(targetProfileUrl != null && { targetProfileUrl }),
-        ...(targetName != null && { targetName }),
-        ...(actorLinkedinId != null && { actorLinkedinId }),
-        ...(actorName != null && { actorName }),
-        ...(actorPublicIdentifier != null && { actorPublicIdentifier }),
-        ...(reopen && {
-          status: ConnectionRequestStatus.PENDING,
-          sentAt: new Date(),
-          resolvedAt: null,
-        }),
-      },
+    // Delegated so the row update and its history event are written together.
+    // A re-send overwrites this row's previous outcome, but the event for that
+    // outcome was already recorded — which is what keeps expiry counts honest.
+    await ConnectionEventService.recordSent({
+      userId,
+      targetLinkedinId,
+      toStatus: ConnectionRequestStatus.PENDING,
+      source: ConnectionEventSource.INTERCEPT,
+      targetProfileUrl,
+      targetName,
+      actorLinkedinId,
+      actorName,
+      actorPublicIdentifier,
     });
   }
 
   /**
    * Resolve a request that is still PENDING to a terminal status
-   * (ACCEPTED / WITHDRAWN / NOT_ACCEPTED). Scoped to PENDING rows via updateMany
-   * so an out-of-order reconcile can never overwrite an already-resolved request
-   * (e.g. a late "accepted" signal won't undo a "withdrawn"). No-op when there
-   * is nothing pending for that target.
+   * (ACCEPTED / WITHDRAWN / EXPIRED). Guarded to PENDING rows so an out-of-order
+   * signal can never overwrite an already-resolved request — a late "accepted"
+   * won't undo a "withdrawn". No-op when there is nothing pending for that
+   * target, and in that case no event is emitted either (no transition happened).
    */
   static async updateStatus(
     userId: string,
@@ -165,34 +165,46 @@ export class ConnectionService {
     // PENDING is the starting state, not a resolution target.
     if (!isTerminal(status)) return;
 
-    await prisma.connectionRequest.updateMany({
-      where: {
+    // Withdrawals come from intercepting the user's own click, so the moment is
+    // observed exactly — no estimate flag.
+    await ConnectionEventService.applyTransition(
+      {
         userId,
         targetLinkedinId,
-        status: ConnectionRequestStatus.PENDING,
+        toStatus: status,
+        source: ConnectionEventSource.INTERCEPT,
+        occurredAt: new Date(),
       },
-      data: {
-        status,
-        resolvedAt: new Date(),
-      },
-    });
+      [ConnectionRequestStatus.PENDING],
+    );
   }
 
   /**
    * Bulk-reconcile the user's PENDING requests against a LinkedIn snapshot.
    *
-   * Rules (every write is scoped to status: PENDING, so ACCEPTED / WITHDRAWN /
-   * NOT_ACCEPTED rows are never touched):
-   *   - target now a connection            -> ACCEPTED (resolvedAt = connectedAt,
-   *                                            backfill targetName if missing)
-   *   - target gone from "Sent" list, not
-   *     a connection, sent-invites fetched,
-   *     and within the fetched coverage     -> NOT_ACCEPTED
-   *   - otherwise                           -> left PENDING (no write)
+   * Rules (every write is guarded to status PENDING, so already-resolved rows
+   * are never touched):
+   *   - target now a connection            -> ACCEPTED, dated with LinkedIn's
+   *                                            real connection date
+   *   - gone from the Sent list, not a
+   *     connection, walk COMPLETE, within
+   *     the connections coverage           -> absence recorded; EXPIRED only on
+   *                                            the SECOND consecutive such walk
+   *   - was absent, now present again      -> absence marker cleared
+   *   - otherwise                          -> left PENDING (no write)
    *
-   * ACCEPTED wins over NOT_ACCEPTED (runs first; not-accepted excludes connected
-   * ids). Optionally actor-scoped so syncing from account X can't resolve rows
-   * sent from account Y.
+   * Two safety properties matter here:
+   *
+   * 1. ACCEPTED runs first and excludes connected ids from the expiry pass, so
+   *    an acceptance can never be mistaken for an expiry.
+   * 2. Expiry requires a COMPLETE walk AND two consecutive confirmations.
+   *    Offset pagination over a list that mutates mid-walk can skip an entry,
+   *    and a skipped entry is indistinguishable from a resolved one — observed
+   *    live, where a 1-month-old invitation surfaced among 6-month-old ones on
+   *    the final page. One skip must not expire a live invitation.
+   *
+   * Optionally actor-scoped so syncing from account X can't resolve rows sent
+   * from account Y.
    */
   static async reconcile(
     userId: string,
@@ -202,6 +214,7 @@ export class ConnectionService {
       stillPendingIds,
       connected,
       sentInvitationsFetched,
+      sentListComplete,
       coverageFloor,
       actorLinkedinId,
     } = input;
@@ -212,14 +225,7 @@ export class ConnectionService {
       : {};
 
     // All candidate rows currently pending for this user (+ actor scope).
-    const candidates = await prisma.connectionRequest.findMany({
-      where: {
-        userId,
-        status: ConnectionRequestStatus.PENDING,
-        ...actorScope,
-      },
-      select: { targetLinkedinId: true, targetName: true, sentAt: true },
-    });
+    const candidates = await ConnectionRepository.findPendingByUser(userId, actorScope);
 
     const connectedMap = new Map(
       connected.map((c) => [c.targetLinkedinId, c]),
@@ -227,62 +233,98 @@ export class ConnectionService {
     const stillPendingSet = new Set(stillPendingIds);
     const floor = toDate(coverageFloor);
 
-    // Build the two buckets from the loaded candidates.
-    const acceptedRows = candidates.filter((r) =>
-      connectedMap.has(r.targetLinkedinId),
-    );
-    const notAcceptedIds = candidates
-      .filter(
+    const now = new Date();
+
+    // ── ACCEPTED ────────────────────────────────────────────────────────────
+    // Runs first so acceptance always wins over expiry. occurredAt is the real
+    // LinkedIn connection date, so a chart shows when people actually accepted
+    // rather than when a sync happened to notice.
+    let accepted = 0;
+    for (const r of candidates.filter((c) =>
+      connectedMap.has(c.targetLinkedinId),
+    )) {
+      const conn = connectedMap.get(r.targetLinkedinId)!;
+      const connectedAt = toDate(conn.connectedAt);
+      const applied = await ConnectionEventService.applyTransition(
+        {
+          userId,
+          targetLinkedinId: r.targetLinkedinId,
+          toStatus: ConnectionRequestStatus.ACCEPTED,
+          source: ConnectionEventSource.RECONCILE,
+          occurredAt: connectedAt ?? now,
+          occurredAtIsEstimate: connectedAt === null,
+          // Backfill the name only when we don't already have one.
+          targetName: r.targetName == null ? (conn.name ?? null) : null,
+          actorLinkedinId,
+        },
+        [ConnectionRequestStatus.PENDING],
+      );
+      if (applied) accepted++;
+    }
+
+    // ── EXPIRED (absorbs declines — LinkedIn exposes no reject signal) ──────
+    // Requires a COMPLETE walk of the Sent list. A partial walk is
+    // indistinguishable from "everything vanished", so resolving from one would
+    // wrongly expire the entire pending set.
+    let expired = 0;
+    let newlyAbsent = 0;
+    let reappeared = 0;
+
+    if (sentInvitationsFetched && sentListComplete === true) {
+      const absentNow = candidates.filter(
         (r) =>
           !connectedMap.has(r.targetLinkedinId) &&
           !stillPendingSet.has(r.targetLinkedinId) &&
-          sentInvitationsFetched &&
+          // Outside the connections snapshot's coverage a late acceptance may
+          // simply not be visible yet — don't call those expired.
           (floor === null || r.sentAt >= floor),
-      )
-      .map((r) => r.targetLinkedinId);
+      );
 
-    // ACCEPTED: per-row (needs per-target resolvedAt + name backfill), one txn.
-    const acceptedUpdates = acceptedRows.map((r) => {
-      const conn = connectedMap.get(r.targetLinkedinId)!;
-      return prisma.connectionRequest.updateMany({
-        where: {
-          userId,
-          targetLinkedinId: r.targetLinkedinId,
-          status: ConnectionRequestStatus.PENDING,
-        },
-        data: {
-          status: ConnectionRequestStatus.ACCEPTED,
-          resolvedAt: toDate(conn.connectedAt) ?? new Date(),
-          ...(r.targetName == null && conn.name && { targetName: conn.name }),
-        },
-      });
-    });
-    const acceptedResults = acceptedUpdates.length
-      ? await prisma.$transaction(acceptedUpdates)
-      : [];
-    const accepted = acceptedResults.reduce((sum, r) => sum + r.count, 0);
+      for (const r of absentNow) {
+        if (r.absentSince) {
+          // Second consecutive complete walk with this row missing. Offset
+          // pagination over a mutating list can skip an entry once; being
+          // skipped twice in a row is vanishingly unlikely, so now we resolve.
+          const applied = await ConnectionEventService.applyTransition(
+            {
+              userId,
+              targetLinkedinId: r.targetLinkedinId,
+              toStatus: ConnectionRequestStatus.EXPIRED,
+              source: ConnectionEventSource.RECONCILE,
+              // LinkedIn never reports the expiry moment; this is always
+              // inferred — see estimateExpiryDate.
+              occurredAt: estimateExpiryDate(r.sentAt, now),
+              occurredAtIsEstimate: true,
+              actorLinkedinId,
+            },
+            [ConnectionRequestStatus.PENDING],
+          );
+          if (applied) expired++;
+        } else {
+          await ConnectionRepository.markAbsent(userId, r.targetLinkedinId, now);
+          newlyAbsent++;
+        }
+      }
 
-    // NOT_ACCEPTED: one bulk update over the gated id list.
-    let notAccepted = 0;
-    if (notAcceptedIds.length) {
-      const res = await prisma.connectionRequest.updateMany({
-        where: {
-          userId,
-          status: ConnectionRequestStatus.PENDING,
-          targetLinkedinId: { in: notAcceptedIds },
-        },
-        data: {
-          status: ConnectionRequestStatus.NOT_ACCEPTED,
-          resolvedAt: new Date(),
-        },
-      });
-      notAccepted = res.count;
+      // Marked absent before but present again now — a skipped page, not a
+      // resolution. Clear the marker so it isn't expired on the next walk.
+      const backIds = candidates
+        .filter(
+          (r) => r.absentSince && stillPendingSet.has(r.targetLinkedinId),
+        )
+        .map((r) => r.targetLinkedinId);
+      if (backIds.length) {
+        const res = await ConnectionRepository.clearAbsent(userId, backIds);
+        reappeared = res.count;
+      }
     }
 
     return {
       accepted,
-      notAccepted,
-      stillPending: candidates.length - accepted - notAccepted,
+      expired,
+      newlyAbsent,
+      reappeared,
+      stillPending: candidates.length - accepted - expired,
     };
   }
 
@@ -296,10 +338,7 @@ export class ConnectionService {
     targetLinkedinId: string,
     targetName: string,
   ): Promise<void> {
-    await prisma.connectionRequest.updateMany({
-      where: { userId, targetLinkedinId, targetName: null },
-      data: { targetName },
-    });
+    await ConnectionRepository.backfillName(userId, targetLinkedinId, targetName);
   }
 
   /**
@@ -318,18 +357,15 @@ export class ConnectionService {
         ? { userId: { in: restrictUserIds } }
         : {};
 
-    const grouped = await prisma.connectionRequest.groupBy({
-      by: ["status"],
-      _count: { _all: true },
-      where,
-    });
+    const grouped = await ConnectionRepository.groupByStatus(where);
 
     const stats: ConnectionStats = {
       sent: 0,
       pending: 0,
       accepted: 0,
-      notAccepted: 0,
       withdrawn: 0,
+      expired: 0,
+      notAccepted: 0,
     };
 
     for (const row of grouped) {
@@ -342,11 +378,17 @@ export class ConnectionService {
         case ConnectionRequestStatus.ACCEPTED:
           stats.accepted = count;
           break;
-        case ConnectionRequestStatus.NOT_ACCEPTED:
-          stats.notAccepted = count;
-          break;
         case ConnectionRequestStatus.WITHDRAWN:
           stats.withdrawn = count;
+          break;
+        case ConnectionRequestStatus.EXPIRED:
+          stats.expired = count;
+          break;
+        case ConnectionRequestStatus.NOT_ACCEPTED:
+          // Legacy rows only — never written any more. Surfaced under `expired`
+          // too so a historical row isn't silently dropped from the total.
+          stats.notAccepted = count;
+          stats.expired += count;
           break;
       }
     }
@@ -387,8 +429,9 @@ export class ConnectionService {
     const where: Prisma.ConnectionRequestWhereInput = {};
     if (p.userId) where.userId = p.userId;
     else if (p.userIds) where.userId = { in: p.userIds };
-    if (p.actorLinkedinId) where.actorLinkedinId = p.actorLinkedinId;
-    if (p.status) where.status = p.status;
+    if (p.actorLinkedinIds?.length) where.actorLinkedinId = { in: p.actorLinkedinIds };
+    else if (p.actorLinkedinId) where.actorLinkedinId = p.actorLinkedinId;
+    if (p.statuses?.length) where.status = { in: p.statuses };
     if (p.sentFrom || p.sentTo) {
       where.sentAt = {};
       if (p.sentFrom) where.sentAt.gte = p.sentFrom;
@@ -402,27 +445,12 @@ export class ConnectionService {
       ];
     }
 
-    const [data, total] = await prisma.$transaction([
-      prisma.connectionRequest.findMany({
-        where,
-        orderBy: { [sortBy]: sortOrder } as Prisma.ConnectionRequestOrderByWithRelationInput,
-        skip: (page - 1) * limit,
-        take: limit,
-        select: {
-          id: true,
-          userId: true, // so the controller can map the owner to its HubSpot name
-          targetName: true,
-          targetProfileUrl: true,
-          targetLinkedinId: true,
-          actorName: true,
-          status: true,
-          sentAt: true,
-          resolvedAt: true,
-          user: { select: { name: true } }, // DB-name fallback
-        },
-      }),
-      prisma.connectionRequest.count({ where }),
-    ]);
+    const [data, total] = await ConnectionRepository.findAndCount(
+      where,
+      { [sortBy]: sortOrder } as Prisma.ConnectionRequestOrderByWithRelationInput,
+      (page - 1) * limit,
+      limit,
+    );
 
     return {
       data,
@@ -431,10 +459,16 @@ export class ConnectionService {
   }
 
   /**
-   * Per-day connection breakdown between [from, to] (inclusive), bucketed by
-   * sent_at. Each day carries every status count for the grouped bar chart.
+   * COHORT view: of the requests SENT in each bucket, how many are now in each
+   * status. Bucketed on sent_at over the current-state table.
+   *
+   * Note this is inherently lossy for history — the current-state table holds
+   * one row per contact and a re-send moves that row's sent_at forward, so an
+   * earlier send silently leaves its original bucket. For "how much activity
+   * happened in this period", use ConnectionEventService.getSeries instead,
+   * which reads the append-only event log and survives re-sends.
    */
-  static async getSeries(
+  static getSeries(
     userId: string | undefined,
     from: Date,
     to: Date,
@@ -447,36 +481,12 @@ export class ConnectionService {
       sent: number;
       accepted: number;
       pending: number;
+      expired: number;
+      /** DEPRECATED alias of `expired`, kept so existing chart code keeps working. */
       ignored: number;
       withdrawn: number;
     }>
   > {
-    const ownerFilter = userId
-      ? Prisma.sql`AND user_id = ${userId}`
-      : restrictUserIds
-        ? Prisma.sql`AND user_id = ANY(${restrictUserIds})`
-        : Prisma.empty;
-    const accountFilter = actorLinkedinId
-      ? Prisma.sql`AND actor_linkedin_id = ${actorLinkedinId}`
-      : Prisma.empty;
-    // Whitelisted bucket unit for date_trunc (day / week[Mon start] / month).
-    const bucket =
-      granularity === "week" ? "week" : granularity === "month" ? "month" : "day";
-
-    // `date` is the bucket-start (Mon for week, 1st for month) as YYYY-MM-DD.
-    return prisma.$queryRaw`
-      SELECT to_char(date_trunc(${bucket}, sent_at), 'YYYY-MM-DD') AS date,
-             COUNT(*)::int AS sent,
-             COUNT(*) FILTER (WHERE status = 'ACCEPTED')::int     AS accepted,
-             COUNT(*) FILTER (WHERE status = 'PENDING')::int      AS pending,
-             COUNT(*) FILTER (WHERE status = 'NOT_ACCEPTED')::int AS ignored,
-             COUNT(*) FILTER (WHERE status = 'WITHDRAWN')::int    AS withdrawn
-      FROM connection_requests
-      WHERE sent_at >= ${from} AND sent_at <= ${to}
-        ${ownerFilter}
-        ${accountFilter}
-      GROUP BY 1
-      ORDER BY 1
-    `;
+    return ConnectionRepository.getCohortSeries(from, to, { userId, restrictUserIds, actorLinkedinId }, granularity);
   }
 }

@@ -50,6 +50,67 @@ export const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX || "100");
 // in-memory store that is per-instance only.
 export const REDIS_URL = process.env.REDIS_URL || "";
 
+// Optional shared secret for the unauthenticated /api/public/* endpoints.
+// Leave EMPTY to keep them fully open (current behaviour). Set it to require
+// `x-api-key: <key>` (or `Authorization: Bearer <key>`) on those routes.
+export const PUBLIC_API_KEY = process.env.PUBLIC_API_KEY || "";
+
+// Generic numeric env var with a fallback and inclusive range validation. An
+// out-of-range or non-numeric value falls back rather than propagating NaN —
+// e.g. into a date computation, where an Invalid Date can throw deep inside
+// Intl.DateTimeFormat and 500 an otherwise-unrelated request.
+export const numEnv = (
+  name: string,
+  fallback: number,
+  min: number,
+  max: number,
+): number => {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) && n >= min && n <= max ? n : fallback;
+};
+
+// LinkedIn expires sent invitations after ~6 months. Confirmed two ways: its
+// help documentation, and observation — an account with ~1 year of continuous
+// invitations retains nothing older than 6 months in the Sent list.
+// Configurable because LinkedIn has changed this policy before.
+export const LINKEDIN_INVITE_EXPIRY_MONTHS = numEnv(
+  "LINKEDIN_INVITE_EXPIRY_MONTHS",
+  6,
+  1,
+  60,
+);
+
+// Late Messages report thresholds — see lateMessageService.ts for the full
+// reasoning behind quiet hours and the edge-mode toggle.
+export const LATE_MSG_THRESHOLD_HOURS = numEnv(
+  "LATE_MSG_THRESHOLD_HOURS",
+  3,
+  0,
+  24 * 30,
+);
+export const LATE_MSG_QUIET_START_HOUR = numEnv(
+  "LATE_MSG_QUIET_START_HOUR",
+  0,
+  0,
+  23,
+);
+export const LATE_MSG_QUIET_END_HOUR = numEnv(
+  "LATE_MSG_QUIET_END_HOUR",
+  7,
+  0,
+  23,
+);
+export const LATE_MSG_EDGE_MODE: "CAP_AT_QUIET_START" | "EXTEND_PAST_QUIET" =
+  process.env.LATE_MSG_EDGE_MODE === "EXTEND_PAST_QUIET"
+    ? "EXTEND_PAST_QUIET"
+    : "CAP_AT_QUIET_START";
+export const LATE_FOLLOWUP_THRESHOLD_DAYS = numEnv(
+  "LATE_FOLLOWUP_THRESHOLD_DAYS",
+  7,
+  1,
+  365,
+);
+
 // HubSpot OAuth configuration
 export const HUBSPOT_CLIENT_ID = process.env.HUBSPOT_CLIENT_ID || "";
 export const HUBSPOT_CLIENT_SECRET = process.env.HUBSPOT_CLIENT_SECRET || "";
