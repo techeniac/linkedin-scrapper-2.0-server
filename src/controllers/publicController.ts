@@ -432,6 +432,20 @@ const resolveAccountScope = (
   return { accountId: undefined, accountIds: accountIds.length > 0 ? accountIds : undefined };
 };
 
+// The conversationKey is stored as the "2-<threadId>" segment, which is
+// exactly LinkedIn's thread-URL slug. Turns it into a deep link to the
+// conversation on LinkedIn's own site. Used by the Messages, Late Responses,
+// and Follow-up Tracking reports' "Conversation" link — deliberately the
+// conversation, not the contact's profile, per explicit request. NOTE: this
+// only opens correctly for a viewer logged into the exact LinkedIn account
+// that sent/received these messages; it fails for anyone else (the same
+// limitation the in-app MessageThreadDialog popup was built to avoid).
+const THREAD_SLUG_RE = /2-[A-Za-z0-9_=-]+/;
+const conversationUrlFromKey = (conversationKey: unknown): string | null => {
+  const slug = typeof conversationKey === "string" ? conversationKey.match(THREAD_SLUG_RE)?.[0] : undefined;
+  return slug ? `https://www.linkedin.com/messaging/thread/${slug}/` : null;
+};
+
 // Replace each row's owner name with the HubSpot name (fallback to DB name).
 const withOwnerName = (
   rows: any[],
@@ -514,8 +528,8 @@ export const getConnections = async (
 // every row here always has a matching bar on the report's chart. See
 // MessageEventService.list for why this replaced the old conversation-
 // aggregate listing (MessageActivityService.list). Returns
-// `participantProfileUrl` so the frontend can link to the contact's
-// LinkedIn profile.
+// `conversationUrl` (see conversationUrlFromKey) for the "Conversation" link
+// — not a profile URL.
 export const getMessages = async (
   req: Request,
   res: Response,
@@ -552,10 +566,10 @@ export const getMessages = async (
       id: `${r.userId}:${r.conversationKey}:${r.kind}:${r.occurredAt.toISOString().slice(0, 10)}`,
       userId: r.userId,
       conversationKey: r.conversationKey,
+      conversationUrl: conversationUrlFromKey(r.conversationKey),
       kind: r.kind,
       occurredAt: r.occurredAt,
       participantName: r.participantName,
-      participantProfileUrl: r.participantProfileUrl,
       selfName: r.selfName,
     }));
 
@@ -615,14 +629,15 @@ export const getLateMessages = async (
       to,
     });
 
-    // Table columns: Name | LinkedIn URL | Sales Person | LinkedIn Profile.
+    // Table columns: Name | Conversation | Sales Person | LinkedIn Profile.
     // `id` is synthesized (this report has no single-row primary key of its
     // own — a late instance is identified by which conversation, for which
-    // owner) so the frontend has a stable React key.
+    // owner) so the frontend has a stable React key. `conversationUrl` (not
+    // a profile URL) per explicit request — see conversationUrlFromKey.
     const data = result.data.map((r) => ({
       id: `${r.userId}:${r.conversationKey}:${r.occurredAt.toISOString()}`,
       name: r.participantName,
-      linkedinUrl: r.participantProfileUrl,
+      conversationUrl: conversationUrlFromKey(r.conversationKey),
       user: { name: nameMap.get(r.userId) ?? null }, // Sales Person
       linkedinProfile: r.selfName, // the rep's own LinkedIn account
       occurredAt: r.occurredAt,
@@ -675,14 +690,16 @@ export const getMissedFollowUps = async (
       now,
     });
 
-    // Table columns: Name | LinkedIn URL | Sales Person | LinkedIn Profile,
+    // Table columns: Name | Conversation | Sales Person | LinkedIn Profile,
     // plus Status | Missed Since | Follow-Up Sent | Days Late for the history.
     // `id` is synthesized (one row per conversation's CURRENT status, not a
     // single-row primary key) so the frontend has a stable React key.
+    // `conversationUrl` (not a profile URL) per explicit request — see
+    // conversationUrlFromKey.
     const data = result.data.map((r) => ({
       id: `${r.userId}:${r.conversationKey}`,
       name: r.participantName,
-      linkedinUrl: r.participantProfileUrl,
+      conversationUrl: conversationUrlFromKey(r.conversationKey),
       user: { name: nameMap.get(r.userId) ?? null }, // Sales Person
       linkedinProfile: r.selfName, // the rep's own LinkedIn account
       status: r.status,

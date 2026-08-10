@@ -3,6 +3,7 @@ import { body } from "express-validator";
 import {
   recordMessageActivity,
   getMessageStats,
+  getMessageStatsToday,
 } from "../controllers/messageController";
 import { authenticate } from "../middlewares/auth";
 import { validate } from "../middlewares/validateRequest";
@@ -42,6 +43,7 @@ router.post(
     body("events.*.isFirstReply").optional().isBoolean(),
     body("events.*.respondsToAt").optional({ nullable: true }).isString(),
     body("events.*.selfTimeZone").optional({ nullable: true }).isString(),
+    body("events.*.text").optional({ nullable: true }).isString(),
     validate,
   ],
   recordMessageActivity,
@@ -49,5 +51,8 @@ router.post(
 
 // GET /api/messages/stats - per-user + global messaging metrics
 router.get("/stats", userAwareLimiter, getMessageStats);
+
+// GET /api/messages/stats/today - the extension popup's daily counters
+router.get("/stats/today", userAwareLimiter, getMessageStatsToday);
 
 export default router;
