@@ -1,5 +1,4 @@
 // src/services/messageActivityService.ts
-import { Prisma } from "@prisma/client";
 import { MessageActivityRepository } from "../repositories/messageActivityRepository";
 
 /**
@@ -56,23 +55,6 @@ const toDate = (v?: string | null): Date | null => {
   const d = /^\d+$/.test(v) ? new Date(Number(v)) : new Date(v);
   return isNaN(d.getTime()) ? null : d;
 };
-
-// Read params for the public, paginated message-activity list.
-export interface ListMessagesParams {
-  page: number;
-  limit: number;
-  sortBy?: string;
-  sortOrder?: "asc" | "desc";
-  search?: string;
-  userId?: string;
-  userIds?: string[]; // restrict to a set of owners (used when no single userId)
-  selfLinkedinId?: string; // the logged-in LinkedIn account that sent the messages
-  selfLinkedinIds?: string[]; // multi-select account filter; takes precedence over selfLinkedinId
-  hasReply?: boolean;
-  isConversation?: boolean;
-  lastFrom?: Date;
-  lastTo?: Date;
-}
 
 export class MessageActivityService {
   /**
@@ -165,58 +147,8 @@ export class MessageActivityService {
     };
   }
 
-  // Columns a client is allowed to sort by (guards against arbitrary orderBy).
-  private static readonly SORT_COLUMNS = new Set([
-    "lastMessageAt",
-    "firstMessageAt",
-    "sentCount",
-    "receivedCount",
-    "followUpCount",
-    "readCount",
-    "createdAt",
-  ]);
-
-  /** Paginated / filtered / sorted list of message-activity rows (public read). */
-  static async list(p: ListMessagesParams): Promise<{
-    data: unknown[];
-    metadata: { total: number; page: number; limit: number; totalPages: number };
-  }> {
-    const page = Math.max(1, p.page || 1);
-    const limit = Math.min(100, Math.max(1, p.limit || 10));
-    const sortBy = this.SORT_COLUMNS.has(p.sortBy ?? "")
-      ? (p.sortBy as string)
-      : "lastMessageAt";
-    const sortOrder: "asc" | "desc" = p.sortOrder === "asc" ? "asc" : "desc";
-
-    const where: Prisma.MessageActivityWhereInput = {};
-    if (p.userId) where.userId = p.userId;
-    else if (p.userIds) where.userId = { in: p.userIds };
-    if (p.selfLinkedinIds?.length) where.selfLinkedinId = { in: p.selfLinkedinIds };
-    else if (p.selfLinkedinId) where.selfLinkedinId = p.selfLinkedinId;
-    if (typeof p.hasReply === "boolean") where.hasReply = p.hasReply;
-    if (typeof p.isConversation === "boolean") where.isConversation = p.isConversation;
-    if (p.lastFrom || p.lastTo) {
-      where.lastMessageAt = {};
-      if (p.lastFrom) where.lastMessageAt.gte = p.lastFrom;
-      if (p.lastTo) where.lastMessageAt.lte = p.lastTo;
-    }
-    if (p.search) {
-      where.OR = [
-        { participantName: { contains: p.search, mode: "insensitive" } },
-        { participantProfileUrl: { contains: p.search, mode: "insensitive" } },
-      ];
-    }
-
-    const [data, total] = await MessageActivityRepository.findAndCount(
-      where,
-      { [sortBy]: sortOrder } as Prisma.MessageActivityOrderByWithRelationInput,
-      (page - 1) * limit,
-      limit,
-    );
-
-    return {
-      data,
-      metadata: { total, page, limit, totalPages: Math.max(1, Math.ceil(total / limit)) },
-    };
-  }
+  // NOTE: the report table's paginated list moved to MessageEventService.
+  // list (reading message_events, not this conversation-aggregate table) —
+  // see that method's doc comment for why. This class keeps only upsert and
+  // the stats aggregates.
 }

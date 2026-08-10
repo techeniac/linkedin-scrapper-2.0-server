@@ -80,6 +80,22 @@ export const LINKEDIN_INVITE_EXPIRY_MONTHS = numEnv(
   60,
 );
 
+// Sending an invite and LinkedIn's OWN "Sent" list reflecting it back are not
+// perfectly atomic — a reconcile walk that runs within moments of a send can
+// find the invite genuinely still missing from LinkedIn's Sent list purely
+// due to that lag, not because anything actually resolved. VERIFIED live
+// (2026-08-06): an invite sent at 12:56:56 was marked absent, then EXPIRED,
+// by 12:58:46 — under 2 minutes later — because two reconcile walks both ran
+// before LinkedIn's own list had caught up with the send. A newly-sent row
+// is excluded from the absence/expiry check entirely until it's at least
+// this old, giving LinkedIn's list time to actually reflect it.
+export const RECONCILE_MIN_AGE_MINUTES = numEnv(
+  "RECONCILE_MIN_AGE_MINUTES",
+  30,
+  0,
+  24 * 60,
+);
+
 // Late Messages report thresholds — see lateMessageService.ts for the full
 // reasoning behind quiet hours and the edge-mode toggle.
 export const LATE_MSG_THRESHOLD_HOURS = numEnv(

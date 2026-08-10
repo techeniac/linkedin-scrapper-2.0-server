@@ -2,7 +2,6 @@ import { Request, Response, NextFunction } from "express";
 import { ConnectionRequestStatus } from "@prisma/client";
 import { ConnectionService } from "../services/connectionService";
 import { ConnectionEventService } from "../services/connectionEventService";
-import { MessageActivityService } from "../services/messageActivityService";
 import { MessageEventService } from "../services/messageEventService";
 import { LateMessageService } from "../services/lateMessageService";
 import { MissedFollowUpService } from "../services/missedFollowUpService";
@@ -12,7 +11,7 @@ import {
   getConnectedOwnerNameMap,
 } from "../services/hubspotOwnersService";
 import prisma from "../config/prisma";
-import { successResponse } from "../utils/apiResponse";
+import { successResponse, errorResponse } from "../utils/apiResponse";
 
 type LinkedinAccount = { id: string; name: string | null };
 // Distinct (ownerId, linkedinAccountId) pairs — "which accounts has this
@@ -225,11 +224,22 @@ export const getSummary = async (
     // pays for the extra grouping.
     const breakdownOwnerIds = pickOwners(req.query.ownerIds, ownerIds);
 
+    // The SAME owner selection the client sent (breakdownOwnerIds) must also
+    // scope every totals/non-split series query below — not just the ByOwner
+    // ones. Previously the totals queries used the unfiltered `ownerIds` (ALL
+    // connected owners) regardless of which owners the user had filtered to,
+    // so the number printed above each bar (and the KPI totals) silently
+    // reflected the whole company while the plotted segments reflected only
+    // the filtered subset — e.g. a bar showing one owner's "4" underneath a
+    // total of "8" from other, hidden owners. Falls back to every connected
+    // owner only when the client didn't request a specific scope at all.
+    const ownerScope = breakdownOwnerIds.length ? breakdownOwnerIds : ownerIds;
+
     // Shared scope for the message-derived reports (Late Messages, Missed
     // Follow-Up) — both filter identically, so define once.
     const messageOpts = {
       userId,
-      restrictUserIds: ownerIds,
+      restrictUserIds: ownerScope,
       selfLinkedinId: linkedinId,
       selfLinkedinIds: linkedinIds,
     };
@@ -246,16 +256,18 @@ export const getSummary = async (
       linkedinAccounts,
       connectionsActivitySeriesByOwner,
       messagesSeriesByOwner,
+      connectionsActivitySeriesByOwnerAccount,
+      messagesSeriesByOwnerAccount,
     ] = await Promise.all([
       // COHORT: of requests sent in each bucket, their status now.
-      ConnectionService.getSeries(userId, from, to, ownerIds, linkedinId, granularity),
+      ConnectionService.getSeries(userId, from, to, ownerScope, linkedinId, granularity),
       // ACTIVITY: what actually happened in each bucket, from the append-only
       // event log. This is the series the Connection Requests report wants —
       // it counts every send (including re-sends) and every expiry at the time
       // it occurred, which the cohort view above cannot do.
       ConnectionEventService.getSeries(from, to, {
         userId,
-        restrictUserIds: ownerIds,
+        restrictUserIds: ownerScope,
         actorLinkedinId: linkedinId,
         actorLinkedinIds: linkedinIds,
         granularity,
@@ -263,7 +275,7 @@ export const getSummary = async (
       }),
       ConnectionEventService.getTotals(from, to, {
         userId,
-        restrictUserIds: ownerIds,
+        restrictUserIds: ownerScope,
         actorLinkedinId: linkedinId,
         actorLinkedinIds: linkedinIds,
       }),
@@ -272,7 +284,7 @@ export const getSummary = async (
       // history doesn't all land on the day of its most recent message.
       MessageEventService.getSeries(from, to, {
         userId,
-        restrictUserIds: ownerIds,
+        restrictUserIds: ownerScope,
         selfLinkedinId: linkedinId,
         selfLinkedinIds: linkedinIds,
         granularity,
@@ -280,7 +292,7 @@ export const getSummary = async (
       // Windowed totals for the report's KPI cards, mirroring connectionsTotals.
       MessageEventService.getTotals(from, to, {
         userId,
-        restrictUserIds: ownerIds,
+        restrictUserIds: ownerScope,
         selfLinkedinId: linkedinId,
         selfLinkedinIds: linkedinIds,
       }),
@@ -311,6 +323,19 @@ export const getSummary = async (
         selfLinkedinIds: linkedinIds,
         granularity,
       }),
+      // Per-(owner, LinkedIn account) breakdown for the chart hover popup —
+      // same opt-in short-circuit as the per-owner queries above.
+      ConnectionEventService.getSeriesByOwnerAccount(from, to, breakdownOwnerIds, {
+        actorLinkedinId: linkedinId,
+        actorLinkedinIds: linkedinIds,
+        granularity,
+        statuses: connectionStatuses.length ? connectionStatuses : undefined,
+      }),
+      MessageEventService.getSeriesByOwnerAccount(from, to, breakdownOwnerIds, {
+        selfLinkedinId: linkedinId,
+        selfLinkedinIds: linkedinIds,
+        granularity,
+      }),
     ]);
 
     const lateSeries = LateMessageService.buildSeries(lateRows, granularity);
@@ -333,10 +358,22 @@ export const getSummary = async (
       from,
       to,
     );
+    const lateSeriesByOwnerAccount = LateMessageService.buildSeriesByOwnerAccount(
+      lateRows,
+      breakdownOwnerIds,
+      granularity,
+    );
+    const missedFollowUpSeriesByOwnerAccount = MissedFollowUpService.buildSeriesByOwnerAccount(
+      missedBacklog,
+      missedCrossings,
+      breakdownOwnerIds,
+      from,
+      to,
+    );
 
     // Pending is a SNAPSHOT, not a time series — "how many are outstanding
     // right now" — so it comes from current state rather than the event log.
-    const pendingNow = await ConnectionService.getStats(userId, ownerIds);
+    const pendingNow = await ConnectionService.getStats(userId, ownerScope);
 
     successResponse(
       res,
@@ -344,15 +381,19 @@ export const getSummary = async (
         connectionsSeries,
         connectionsActivitySeries,
         connectionsActivitySeriesByOwner,
+        connectionsActivitySeriesByOwnerAccount,
         connectionsTotals: { ...connectionsTotals, pending: pendingNow.pending },
         messagesSeries,
         messagesSeriesByOwner,
+        messagesSeriesByOwnerAccount,
         messagesTotals,
         lateSeries,
         lateSeriesByOwner,
+        lateSeriesByOwnerAccount,
         lateTotals,
         missedFollowUpSeries,
         missedFollowUpSeriesByOwner,
+        missedFollowUpSeriesByOwnerAccount,
         missedFollowUpNow,
         users: owners,
         linkedinAccounts,
@@ -401,32 +442,22 @@ const withOwnerName = (
     return { ...rest, user: { name: nameMap.get(userId) ?? user?.name ?? null } };
   });
 
-// The conversationKey is stored as the "2-<threadId>" segment, which is exactly
-// LinkedIn's thread-URL slug. Turn it into a deep link to the conversation and
-// drop the raw key from the response.
-const THREAD_SLUG_RE = /2-[A-Za-z0-9_=-]+/;
-const withConversationUrl = (rows: any[]): any[] =>
-  rows.map((r) => {
-    const { conversationKey, ...rest } = r;
-    const slug =
-      typeof conversationKey === "string"
-        ? conversationKey.match(THREAD_SLUG_RE)?.[0]
-        : undefined;
-    return {
-      ...rest,
-      conversationUrl: slug
-        ? `https://www.linkedin.com/messaging/thread/${slug}/`
-        : null,
-    };
-  });
-
 // GET /api/public/connections — connected owners only, HubSpot names.
+// Windowed by from?/to? (ISO, defaults to the same 30-day window as
+// /summary) over occurredAt — one row per (target, status transition) from
+// the append-only event log, so every row here always has a matching bar on
+// the report's chart. See ConnectionEventService.list for why this replaced
+// the old current-state-table listing.
 export const getConnections = async (
   req: Request,
   res: Response,
   next: NextFunction,
 ): Promise<void> => {
   try {
+    const now = new Date();
+    let to = toDate(req.query.to) ?? now;
+    let from = toDate(req.query.from) ?? new Date(to.getTime() - 30 * DAY_MS);
+    if (from > to) [from, to] = [to, from];
     const [ownerIds, nameMap] = await Promise.all([
       getConnectedOwnerIds(),
       getConnectedOwnerNameMap(),
@@ -438,7 +469,7 @@ export const getConnections = async (
       .map((s) => s.toUpperCase())
       .filter((s): s is ConnectionRequestStatus => s in ConnectionRequestStatus);
 
-    const result = await ConnectionService.list({
+    const result = await ConnectionEventService.list({
       page: toInt(req.query.page, 1),
       limit: toInt(req.query.limit, 10),
       sortBy: toStr(req.query.sortBy),
@@ -449,13 +480,27 @@ export const getConnections = async (
       actorLinkedinId: accountId,
       actorLinkedinIds: accountIds,
       statuses: statuses.length ? statuses : undefined,
-      sentFrom: toDate(req.query.sentFrom),
-      sentTo: toDate(req.query.sentTo),
+      from,
+      to,
     });
+
+    // Table columns: Owner | LinkedIn Profile | Contact Name | Status | Date |
+    // Profile. `status`/`date` here name the specific TRANSITION this row is
+    // (toStatus/occurredAt), not a request's current lifecycle state.
+    const data = (result.data as any[]).map((r) => ({
+      id: r.id,
+      userId: r.userId,
+      user: r.user,
+      linkedinProfile: r.actorName,
+      contactName: r.targetName,
+      status: r.toStatus,
+      date: r.occurredAt,
+      profileUrl: r.targetProfileUrl,
+    }));
 
     successResponse(
       res,
-      { data: withOwnerName(result.data as any[], nameMap), metadata: result.metadata },
+      { data: withOwnerName(data, nameMap), metadata: result.metadata },
       "Connections retrieved",
     );
   } catch (error) {
@@ -463,40 +508,61 @@ export const getConnections = async (
   }
 };
 
-// GET /api/public/messages — connected owners only, HubSpot names.
+// GET /api/public/messages — connected owners only, HubSpot names. Windowed
+// by from?/to? (ISO, defaults to the same 30-day window as /summary) over
+// occurredAt — one row per (kind, conversation, day) from the event log, so
+// every row here always has a matching bar on the report's chart. See
+// MessageEventService.list for why this replaced the old conversation-
+// aggregate listing (MessageActivityService.list). Returns
+// `participantProfileUrl` so the frontend can link to the contact's
+// LinkedIn profile.
 export const getMessages = async (
   req: Request,
   res: Response,
   next: NextFunction,
 ): Promise<void> => {
   try {
+    const now = new Date();
+    let to = toDate(req.query.to) ?? now;
+    let from = toDate(req.query.from) ?? new Date(to.getTime() - 30 * DAY_MS);
+    if (from > to) [from, to] = [to, from];
     const [ownerIds, nameMap] = await Promise.all([
       getConnectedOwnerIds(),
       getConnectedOwnerNameMap(),
     ]);
     const { userId, userIds } = resolveOwnerScope(req, ownerIds);
     const { accountId, accountIds } = resolveAccountScope(req);
+    const kindRaw = toStr(req.query.kind)?.toUpperCase();
+    const kind =
+      kindRaw === "FRESH" || kindRaw === "FOLLOW_UP" || kindRaw === "REPLIED" ? kindRaw : undefined;
 
-    const result = await MessageActivityService.list({
+    const result = await MessageEventService.list({
       page: toInt(req.query.page, 1),
       limit: toInt(req.query.limit, 10),
-      sortBy: toStr(req.query.sortBy),
-      sortOrder: toSortOrder(req.query.sortOrder),
-      search: toStr(req.query.search),
       userId,
       userIds,
       selfLinkedinId: accountId,
       selfLinkedinIds: accountIds,
-      hasReply: toBool(req.query.hasReply),
-      isConversation: toBool(req.query.isConversation),
-      lastFrom: toDate(req.query.lastFrom),
-      lastTo: toDate(req.query.lastTo),
+      kind,
+      from,
+      to,
     });
+
+    const data = result.data.map((r) => ({
+      id: `${r.userId}:${r.conversationKey}:${r.kind}:${r.occurredAt.toISOString().slice(0, 10)}`,
+      userId: r.userId,
+      conversationKey: r.conversationKey,
+      kind: r.kind,
+      occurredAt: r.occurredAt,
+      participantName: r.participantName,
+      participantProfileUrl: r.participantProfileUrl,
+      selfName: r.selfName,
+    }));
 
     successResponse(
       res,
       {
-        data: withConversationUrl(withOwnerName(result.data as any[], nameMap)),
+        data: withOwnerName(data, nameMap),
         metadata: result.metadata,
       },
       "Messages retrieved",
@@ -573,9 +639,10 @@ export const getLateMessages = async (
 // Follow-Up report: one row per conversation, showing its current follow-up
 // status — still overdue (STILL_MISSING), or resolved but late
 // (RESOLVED_LATE) — so an admin can see the full history, not just the
-// current backlog. Not windowed by date: message_events is immutable, so
-// this answers the same regardless of when you ask. Query: userId?,
-// linkedinId?, page?, limit?.
+// current backlog. Windowed by deadline over from?/to? (ISO, defaults to the
+// same 30-day window as /summary) — same field the chart buckets on, so
+// every table row here always has a matching bar on the chart. Query: from?,
+// to?, userId?, linkedinId?, page?, limit?.
 export const getMissedFollowUps = async (
   req: Request,
   res: Response,
@@ -583,6 +650,9 @@ export const getMissedFollowUps = async (
 ): Promise<void> => {
   try {
     const now = new Date();
+    let to = toDate(req.query.to) ?? now;
+    let from = toDate(req.query.from) ?? new Date(to.getTime() - 30 * DAY_MS);
+    if (from > to) [from, to] = [to, from];
     const [ownerIds, nameMap] = await Promise.all([
       getConnectedOwnerIds(),
       getConnectedOwnerNameMap(),
@@ -600,6 +670,8 @@ export const getMissedFollowUps = async (
       selfLinkedinId: accountId,
       selfLinkedinIds: accountIds,
       status,
+      from,
+      to,
       now,
     });
 

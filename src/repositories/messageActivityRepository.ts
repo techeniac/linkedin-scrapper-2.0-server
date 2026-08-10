@@ -166,38 +166,4 @@ export class MessageActivityRepository {
     );
   }
 
-  /** Paginated rows + total count, in one round trip. */
-  static findAndCount(
-    where: Prisma.MessageActivityWhereInput,
-    orderBy: Prisma.MessageActivityOrderByWithRelationInput,
-    skip: number,
-    take: number,
-  ) {
-    return prisma.$transaction([
-      prisma.messageActivity.findMany({
-        where,
-        orderBy,
-        skip,
-        take,
-        select: {
-          id: true,
-          userId: true, // so the controller can map the owner to its HubSpot name
-          conversationKey: true, // used to build the LinkedIn thread URL
-          participantName: true,
-          participantProfileUrl: true,
-          selfName: true,
-          sentCount: true,
-          receivedCount: true,
-          followUpCount: true,
-          readCount: true,
-          hasReply: true,
-          isConversation: true,
-          firstMessageAt: true,
-          lastMessageAt: true,
-          user: { select: { name: true } }, // owner NAME only (no email while public)
-        },
-      }),
-      prisma.messageActivity.count({ where }),
-    ]);
-  }
 }

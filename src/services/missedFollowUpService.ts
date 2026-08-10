@@ -169,6 +169,45 @@ export class MissedFollowUpService {
   }
 
   /**
+   * Same combination as buildSeriesByOwner, additionally split by LinkedIn
+   * account — one entry per (date, userId, selfLinkedinId). Powers the chart
+   * hover popup's per-account breakdown within an owner's segment.
+   * `accountId` is `null` for rows captured before self-account tracking
+   * existed — grouped as their own bucket rather than dropped.
+   */
+  static buildSeriesByOwnerAccount(
+    backlog: BacklogRow[],
+    resolvedCrossings: Array<{ userId: string; selfLinkedinId: string | null; respondsToAt: Date }>,
+    ownerIds: string[],
+    from: Date,
+    to: Date,
+  ): Array<{ date: string; userId: string; accountId: string | null; stillMissing: number; resolvedLate: number }> {
+    const allowed = new Set(ownerIds);
+    const buckets = new Map<
+      string,
+      { date: string; userId: string; accountId: string | null; stillMissing: number; resolvedLate: number }
+    >();
+    const bump = (
+      userId: string,
+      accountId: string | null,
+      deadline: Date,
+      field: "stillMissing" | "resolvedLate",
+    ) => {
+      if (!allowed.has(userId)) return;
+      if (deadline < from || deadline > to) return;
+      const date = truncUTC(deadline);
+      const key = `${date}::${userId}::${accountId ?? ""}`;
+      const b = buckets.get(key) ?? { date, userId, accountId, stillMissing: 0, resolvedLate: 0 };
+      b[field] += 1;
+      buckets.set(key, b);
+    };
+    for (const r of backlog) bump(r.userId, r.selfLinkedinId, r.deadline, "stillMissing");
+    for (const r of resolvedCrossings) bump(r.userId, r.selfLinkedinId, computeFollowUpDeadline(r.respondsToAt), "resolvedLate");
+
+    return Array.from(buckets.values()).sort((a, b) => a.date.localeCompare(b.date));
+  }
+
+  /**
    * A STABLE count of deadline crossings per bucket — unlike getCurrentCount
    * (a live snapshot), this doesn't change retroactively as items get
    * resolved, because it's the UNION of two independent, non-overlapping
@@ -207,8 +246,11 @@ export class MissedFollowUpService {
 
   /**
    * Paginated supporting-table rows — one row per conversation, showing its
-   * CURRENT follow-up status: still overdue, or resolved (late). Not
-   * windowed by date: covers all-time history, same as the KPI count.
+   * CURRENT follow-up status: still overdue, or resolved (late). Windowed by
+   * `deadline` (the same field buildSeries buckets the chart on) over
+   * [from, to] — so every row shown here always has a matching bar on the
+   * chart for the same date range, instead of the table silently including
+   * all-time history the chart's window wouldn't plot.
    */
   static async listHistory(params: {
     page: number;
@@ -218,6 +260,8 @@ export class MissedFollowUpService {
     selfLinkedinId?: string;
     selfLinkedinIds?: string[];
     status?: "STILL_MISSING" | "RESOLVED_LATE";
+    from: Date;
+    to: Date;
     now: Date;
   }): Promise<{
     data: Array<{
@@ -295,7 +339,10 @@ export class MissedFollowUpService {
       });
     }
 
-    const allRows = Array.from(byConversation.values()).sort((a, b) => b.recency - a.recency);
+    const windowed = Array.from(byConversation.values()).filter(
+      (r) => r.deadline >= params.from && r.deadline <= params.to,
+    );
+    const allRows = windowed.sort((a, b) => b.recency - a.recency);
     const rows = params.status ? allRows.filter((r) => r.status === params.status) : allRows;
     const total = rows.length;
     const page_ = rows.slice((page - 1) * limit, (page - 1) * limit + limit);

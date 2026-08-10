@@ -130,6 +130,12 @@ model ConnectionRequestEvent {
   targetName       String?                  @map("target_name")
   targetProfileUrl String?                  @map("target_profile_url")
   actorLinkedinId  String?                  @map("actor_linkedin_id")
+  // Snapshotted for the same reason as targetName/targetProfileUrl above — the
+  // Connection Requests report table now reads directly from this event log
+  // (one row per transition, dated by occurredAt) rather than the current-state
+  // table, so it needs the actor's display identity available per-row.
+  actorName             String?             @map("actor_name")
+  actorPublicIdentifier String?             @map("actor_public_identifier")
   // null for the initial send (no prior state).
   fromStatus       ConnectionRequestStatus? @map("from_status")
   toStatus         ConnectionRequestStatus  @map("to_status")
@@ -249,6 +255,16 @@ model MessageEvent {
   selfTimeZone    String?          @map("self_time_zone")
   participantLinkedinId String?    @map("participant_linkedin_id")
   selfLinkedinId  String?          @map("self_linkedin_id")
+  // The message's own text, captured so the Messages report can show an
+  // in-app conversation popup instead of deep-linking to LinkedIn's own
+  // chat page (which fails whenever the viewer isn't logged into the exact
+  // LinkedIn account that sent/received it). Only populated going forward —
+  // existing rows predate this column and will read as null. Immutable like
+  // occurredAt/type, but COALESCEd (not excluded) on conflict: unlike the
+  // classification flags, there's no reason a later, more-informed
+  // derivation would ever see a WORSE value than an earlier one that missed
+  // it (e.g. a transient DOM read), so filling a null is always safe.
+  text            String?
   createdAt       DateTime         @default(now()) @map("created_at")
 
   @@unique([userId, conversationKey, messageId])

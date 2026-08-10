@@ -153,6 +153,28 @@ function truncUTC(d: Date, granularity: "day" | "week" | "month"): string {
   return monday.toISOString().slice(0, 10);
 }
 
+/**
+ * Collapses raw late-message EVENTS down to one per (kind, conversation,
+ * calendar day) — a person late twice in one day counts once that day; the
+ * same person late on 3 DIFFERENT days counts 3 times, once per day. This is
+ * the single source of truth every "distinct count" below (buildSeries,
+ * buildSeriesByOwner, buildTotals, and list's table rows) keys off, so a
+ * day's chart number and that day's table row count always agree instead of
+ * one counting raw events and the other deduping across the whole window.
+ * Within a (kind, conversation, day) group, keeps the LATEST instance.
+ */
+function dedupeByConversationPerDay(rows: LateRow[]): LateRow[] {
+  const byKey = new Map<string, LateRow>();
+  for (const r of rows) {
+    const key = `${r.kind}::${r.userId}::${r.conversationKey}::${truncUTC(r.occurredAt, "day")}`;
+    const existing = byKey.get(key);
+    if (!existing || r.occurredAt.getTime() > existing.occurredAt.getTime()) {
+      byKey.set(key, r);
+    }
+  }
+  return Array.from(byKey.values());
+}
+
 export interface LateRow {
   userId: string;
   conversationKey: string;
@@ -206,13 +228,18 @@ export class LateMessageService {
     return [...replies, ...followUps];
   }
 
-  /** Pure aggregation: buckets already-fetched rows into the chart series. No DB access. */
+  /**
+   * Pure aggregation: buckets already-fetched rows into the chart series. No
+   * DB access. Counts DISTINCT (conversation, day) instances, not raw
+   * events — see dedupeByConversationPerDay.
+   */
   static buildSeries(
     rows: LateRow[],
     granularity: "day" | "week" | "month" = "day",
   ): Array<{ date: string; lateReplies: number; lateFollowUps: number }> {
+    const deduped = dedupeByConversationPerDay(rows);
     const buckets = new Map<string, { lateReplies: number; lateFollowUps: number }>();
-    for (const r of rows) {
+    for (const r of deduped) {
       const key = truncUTC(r.occurredAt, granularity);
       const b = buckets.get(key) ?? { lateReplies: 0, lateFollowUps: 0 };
       if (r.kind === "LATE_REPLY") b.lateReplies += 1;
@@ -236,8 +263,9 @@ export class LateMessageService {
     granularity: "day" | "week" | "month" = "day",
   ): Array<{ date: string; userId: string; lateReplies: number; lateFollowUps: number }> {
     const allowed = new Set(ownerIds);
+    const deduped = dedupeByConversationPerDay(rows);
     const buckets = new Map<string, { lateReplies: number; lateFollowUps: number }>();
-    for (const r of rows) {
+    for (const r of deduped) {
       if (!allowed.has(r.userId)) continue;
       const key = `${truncUTC(r.occurredAt, granularity)}::${r.userId}`;
       const b = buckets.get(key) ?? { lateReplies: 0, lateFollowUps: 0 };
@@ -253,11 +281,46 @@ export class LateMessageService {
       .sort((a, b) => a.date.localeCompare(b.date));
   }
 
-  /** Pure aggregation: totals from already-fetched rows. No DB access. */
+  /**
+   * Same bucketing as buildSeriesByOwner, additionally split by LinkedIn
+   * account — one entry per (date, userId, selfLinkedinId). Powers the chart
+   * hover popup's per-account breakdown within an owner's segment.
+   * `accountId` is `null` for rows captured before self-account tracking
+   * existed — grouped as their own bucket rather than dropped.
+   */
+  static buildSeriesByOwnerAccount(
+    rows: LateRow[],
+    ownerIds: string[],
+    granularity: "day" | "week" | "month" = "day",
+  ): Array<{ date: string; userId: string; accountId: string | null; lateReplies: number; lateFollowUps: number }> {
+    const allowed = new Set(ownerIds);
+    const deduped = dedupeByConversationPerDay(rows);
+    const buckets = new Map<string, { date: string; userId: string; accountId: string | null; lateReplies: number; lateFollowUps: number }>();
+    for (const r of deduped) {
+      if (!allowed.has(r.userId)) continue;
+      const key = `${truncUTC(r.occurredAt, granularity)}::${r.userId}::${r.selfLinkedinId ?? ""}`;
+      const b = buckets.get(key) ?? {
+        date: truncUTC(r.occurredAt, granularity),
+        userId: r.userId,
+        accountId: r.selfLinkedinId,
+        lateReplies: 0,
+        lateFollowUps: 0,
+      };
+      if (r.kind === "LATE_REPLY") b.lateReplies += 1;
+      else b.lateFollowUps += 1;
+      buckets.set(key, b);
+    }
+    return Array.from(buckets.values()).sort((a, b) => a.date.localeCompare(b.date));
+  }
+
+  /**
+   * Pure aggregation: totals from already-fetched rows. No DB access. Same
+   * distinct (conversation, day) counting as buildSeries above.
+   */
   static buildTotals(rows: LateRow[]): { lateReplies: number; lateFollowUps: number } {
     let lateReplies = 0;
     let lateFollowUps = 0;
-    for (const r of rows) {
+    for (const r of dedupeByConversationPerDay(rows)) {
       if (r.kind === "LATE_REPLY") lateReplies += 1;
       else lateFollowUps += 1;
     }
@@ -285,12 +348,13 @@ export class LateMessageService {
   }
 
   /**
-   * Paginated supporting-table rows: one row per conversation, deduped to its
-   * MOST RECENT late instance in the window (a conversation late twice shows
-   * once, as its latest occurrence) — "the specific LinkedIn profiles
-   * involved", not a raw event count. Name/LinkedIn URL come from
-   * MessageActivity, the only place the participant's display identity is
-   * stored.
+   * Paginated supporting-table rows: one row per (conversation, day), deduped
+   * to that day's MOST RECENT late instance (a conversation late twice in one
+   * day shows once, as that day's latest occurrence; late again on a
+   * different day shows again as its own row) — matches buildSeries/
+   * buildTotals above exactly, so a day's chart number and its table row
+   * count always agree. Name/LinkedIn URL come from MessageActivity, the only
+   * place the participant's display identity is stored.
    */
   static async list(params: {
     page: number;
@@ -326,11 +390,12 @@ export class LateMessageService {
       })
     ).sort((a, b) => b.occurredAt.getTime() - a.occurredAt.getTime());
 
-    // Dedupe to one row per (userId, conversationKey) — since `sorted` is
-    // newest-first, the first occurrence seen per key is its latest instance.
+    // Dedupe to one row per (userId, conversationKey, kind, day) — since
+    // `sorted` is newest-first, the first occurrence seen per key is that
+    // day's latest instance.
     const dedupedByConversation = new Map<string, LateRow>();
     for (const r of sorted) {
-      const key = `${r.userId}:${r.conversationKey}`;
+      const key = `${r.userId}:${r.conversationKey}:${r.kind}:${truncUTC(r.occurredAt, "day")}`;
       if (!dedupedByConversation.has(key)) dedupedByConversation.set(key, r);
     }
     const deduped = Array.from(dedupedByConversation.values());

@@ -1,7 +1,14 @@
 // src/services/messageEventService.ts
 import { MessageEventType } from "@prisma/client";
 import { randomUUID } from "crypto";
-import { MessageEventRepository } from "../repositories/messageEventRepository";
+import { MessageEventRepository, QualifyingEventRow } from "../repositories/messageEventRepository";
+
+// UTC calendar day, matching the day-level granularity buildSeries/dedup key
+// off — a message qualifies for at most one FRESH/REPLIED instance ever, but
+// FOLLOW_UP can repeat, possibly more than once on the same day.
+function truncDayUTC(d: Date): string {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())).toISOString().slice(0, 10);
+}
 
 /**
  * Per-message history — see the MessageEvent model comment in schema.prisma
@@ -63,6 +70,10 @@ export interface MessageEventInput {
   isFirstReply?: boolean;
   respondsToAt?: string; // ISO or epoch-ms string; absent for the first message
   selfTimeZone?: string; // IANA zone, e.g. "Asia/Kolkata"
+  // The message's own text — powers the Messages report's in-app chat popup.
+  // Optional: older extension builds won't send it, and some captures
+  // legitimately have none (e.g. an attachment-only message).
+  text?: string;
 }
 
 export interface RecordEventsInput {
@@ -113,6 +124,7 @@ export class MessageEventService {
           selfTimeZone: e.selfTimeZone ?? null,
           participantLinkedinId: input.participantLinkedinId ?? null,
           selfLinkedinId: input.selfLinkedinId ?? null,
+          text: e.text?.trim() || null,
         };
       })
       .filter((r): r is NonNullable<typeof r> => r !== null);
@@ -179,6 +191,36 @@ export class MessageEventService {
     return MessageEventRepository.getSeriesByOwner(from, to, ownerIds, opts);
   }
 
+  /**
+   * Same bucketing as getSeriesByOwner, additionally split by LinkedIn
+   * account — one row per (date, userId, selfLinkedinId). Powers the chart
+   * hover popup's per-account breakdown within an owner's segment.
+   */
+  static getSeriesByOwnerAccount(
+    from: Date,
+    to: Date,
+    ownerIds: string[],
+    opts: {
+      selfLinkedinId?: string;
+      selfLinkedinIds?: string[];
+      granularity?: "day" | "week" | "month";
+    } = {},
+  ): Promise<
+    Array<{
+      date: string;
+      userId: string;
+      accountId: string | null;
+      fresh: number;
+      followups: number;
+      sent: number;
+      received: number;
+      replied: number;
+    }>
+  > {
+    if (ownerIds.length === 0) return Promise.resolve([]);
+    return MessageEventRepository.getSeriesByOwnerAccount(from, to, ownerIds, opts);
+  }
+
   /** Totals over the event history for a window (no bucketing). */
   static getTotals(
     from: Date,
@@ -197,5 +239,84 @@ export class MessageEventService {
     replied: number;
   }> {
     return MessageEventRepository.getTotals(from, to, opts);
+  }
+
+  /**
+   * Paginated supporting-table rows for the Messages report: one row per
+   * (kind, conversation, calendar day), deduped to that day's MOST RECENT
+   * qualifying instance — the exact same 3 kinds (FRESH/FOLLOW_UP/REPLIED)
+   * and the exact same per-day-distinct counting getSeries buckets the chart
+   * on, so a day's chart bar and that day's table row count always agree.
+   * Replaces the old table (MessageActivityService.list), which listed one
+   * row per conversation dated by its lastMessageAt — a conversation active
+   * across several days contributed a bar to each of the chart's days but
+   * only ever showed up in the table once.
+   */
+  static async list(params: {
+    page: number;
+    limit: number;
+    userId?: string;
+    userIds?: string[];
+    selfLinkedinId?: string;
+    selfLinkedinIds?: string[];
+    kind?: "FRESH" | "FOLLOW_UP" | "REPLIED";
+    from: Date;
+    to: Date;
+  }): Promise<{
+    data: Array<{
+      userId: string;
+      conversationKey: string;
+      occurredAt: Date;
+      kind: "FRESH" | "FOLLOW_UP" | "REPLIED";
+      participantName: string | null;
+      participantProfileUrl: string | null;
+      selfName: string | null;
+    }>;
+    metadata: { total: number; page: number; limit: number; totalPages: number };
+  }> {
+    const page = Math.max(1, params.page || 1);
+    const limit = Math.min(100, Math.max(1, params.limit || 10));
+
+    const rows = await MessageEventRepository.findQualifyingEvents(params.from, params.to, {
+      userId: params.userId,
+      restrictUserIds: params.userIds,
+      selfLinkedinId: params.selfLinkedinId,
+      selfLinkedinIds: params.selfLinkedinIds,
+    });
+
+    // Dedupe to one row per (kind, conversation, day) — keep the latest.
+    const byKey = new Map<string, QualifyingEventRow>();
+    for (const r of rows) {
+      const key = `${r.kind}::${r.userId}::${r.conversationKey}::${truncDayUTC(r.occurredAt)}`;
+      const existing = byKey.get(key);
+      if (!existing || r.occurredAt.getTime() > existing.occurredAt.getTime()) byKey.set(key, r);
+    }
+    const sorted = Array.from(byKey.values()).sort((a, b) => b.occurredAt.getTime() - a.occurredAt.getTime());
+    const rows_ = params.kind ? sorted.filter(r => r.kind === params.kind) : sorted;
+
+    const total = rows_.length;
+    const page_ = rows_.slice((page - 1) * limit, (page - 1) * limit + limit);
+
+    const pairs = Array.from(new Map(page_.map(r => [`${r.userId}:${r.conversationKey}`, r])).values());
+    const activities = await MessageEventRepository.findActivityIdentities(pairs);
+    const byIdKey = new Map(activities.map(a => [`${a.userId}:${a.conversationKey}`, a]));
+
+    const data = page_.map(r => {
+      const activity = byIdKey.get(`${r.userId}:${r.conversationKey}`);
+      return {
+        userId: r.userId,
+        conversationKey: r.conversationKey,
+        occurredAt: r.occurredAt,
+        kind: r.kind,
+        participantName: activity?.participantName ?? null,
+        participantProfileUrl: activity?.participantProfileUrl ?? null,
+        selfName: activity?.selfName ?? null,
+      };
+    });
+
+    return {
+      data,
+      metadata: { total, page, limit, totalPages: Math.max(1, Math.ceil(total / limit)) },
+    };
   }
 }
