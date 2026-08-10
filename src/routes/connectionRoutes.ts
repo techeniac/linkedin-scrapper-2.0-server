@@ -6,6 +6,7 @@ import {
   reconcileConnections,
   backfillConnectionName,
   getConnectionStats,
+  getConnectionStatsToday,
 } from "../controllers/connectionController";
 import { authenticate } from "../middlewares/auth";
 import { validate } from "../middlewares/validateRequest";
@@ -98,5 +99,8 @@ router.post(
 
 // GET /api/connections/stats - per-user + global metrics
 router.get("/stats", userAwareLimiter, getConnectionStats);
+
+// GET /api/connections/stats/today - the extension popup's daily counters
+router.get("/stats/today", userAwareLimiter, getConnectionStatsToday);
 
 export default router;
