@@ -29,6 +29,23 @@ import { LINKEDIN_INVITE_EXPIRY_MONTHS } from "../config/env";
 // LinkedIn expires sent invitations after ~6 months — see config/env.ts for
 // the full reasoning and validation.
 
+// Read params for the Connection Requests report's paginated table — see
+// ConnectionEventService.list.
+export interface ListConnectionEventsParams {
+  page: number;
+  limit: number;
+  sortBy?: string;
+  sortOrder?: "asc" | "desc";
+  search?: string;
+  userId?: string;
+  userIds?: string[];
+  actorLinkedinId?: string;
+  actorLinkedinIds?: string[];
+  statuses?: ConnectionRequestStatus[];
+  from: Date;
+  to: Date;
+}
+
 export interface TransitionInput {
   userId: string;
   targetLinkedinId: string;
@@ -125,6 +142,8 @@ export class ConnectionEventService {
       targetName,
       targetProfileUrl,
       actorLinkedinId,
+      actorName,
+      actorPublicIdentifier,
     } = input;
 
     return ConnectionEventRepository.transaction(async tx => {
@@ -151,6 +170,11 @@ export class ConnectionEventService {
         targetName: targetName ?? existing.targetName,
         targetProfileUrl: targetProfileUrl ?? existing.targetProfileUrl,
         actorLinkedinId: actorLinkedinId ?? existing.actorLinkedinId,
+        // These transitions (accept/expire/withdraw) rarely carry a fresh
+        // actor identity of their own — fall back to the row's own snapshot
+        // from whenever it was sent, same as targetName/targetProfileUrl above.
+        actorName: actorName ?? existing.actorName,
+        actorPublicIdentifier: actorPublicIdentifier ?? existing.actorPublicIdentifier,
         fromStatus: existing.status,
         toStatus,
         occurredAt: when,
@@ -243,6 +267,8 @@ export class ConnectionEventService {
             targetName: targetName ?? null,
             targetProfileUrl: targetProfileUrl ?? null,
             actorLinkedinId: actorLinkedinId ?? null,
+            actorName: actorName ?? null,
+            actorPublicIdentifier: actorPublicIdentifier ?? null,
             fromStatus: existing?.status ?? null,
             toStatus: ConnectionRequestStatus.PENDING,
             occurredAt: when,
@@ -302,9 +328,34 @@ export class ConnectionEventService {
   }
 
   /**
-   * Totals over the event history for a window. `sent` counts every send
-   * INCLUDING re-sends, which is the honest answer to "how many requests went
-   * out" — the current-state table can only ever report one per contact.
+   * Same bucketing as getSeriesByOwner, additionally split by LinkedIn
+   * account — one row per (date, userId, actorLinkedinId). Powers the
+   * chart hover popup's per-account breakdown within an owner's segment.
+   */
+  static getSeriesByOwnerAccount(
+    from: Date,
+    to: Date,
+    ownerIds: string[],
+    opts: {
+      actorLinkedinId?: string;
+      actorLinkedinIds?: string[];
+      granularity?: "day" | "week" | "month";
+      statuses?: ConnectionRequestStatus[];
+    } = {},
+  ): Promise<
+    Array<{ date: string; userId: string; accountId: string | null; sent: number; accepted: number; withdrawn: number; expired: number }>
+  > {
+    if (ownerIds.length === 0) return Promise.resolve([]);
+    return ConnectionEventRepository.getSeriesByOwnerAccount(from, to, ownerIds, opts);
+  }
+
+  /**
+   * Totals over the event history for a window. `sent` counts DISTINCT
+   * targets (COUNT(DISTINCT target_linkedin_id)) reached via a PENDING
+   * transition in the window — a withdraw-then-resend to the same person
+   * still counts as one, since only one person ended up being reached out
+   * to. accepted/withdrawn/expired remain event counts (COUNT(*)), since
+   * those transitions don't meaningfully repeat per person.
    */
   static getTotals(
     from: Date,
@@ -317,5 +368,65 @@ export class ConnectionEventService {
     } = {},
   ): Promise<{ sent: number; accepted: number; withdrawn: number; expired: number }> {
     return ConnectionEventRepository.getTotals(from, to, opts);
+  }
+
+  // Columns a client is allowed to sort by (guards against arbitrary
+  // orderBy), keyed by the PUBLIC field name (matches getConnections'
+  // response shape: status/date/contactName) rather than the underlying
+  // Prisma column name.
+  private static readonly SORT_COLUMNS: Record<string, string> = {
+    date: "occurredAt",
+    status: "toStatus",
+    contactName: "targetName",
+  };
+
+  /**
+   * Paginated / filtered / sorted rows for the Connection Requests report
+   * table — one row per (target, transition) from the append-only event log,
+   * windowed by occurredAt over [from, to]. Reads the SAME table and the SAME
+   * date field getSeries buckets the chart on, so every table row here always
+   * has a matching bar on the chart for the same date range — unlike the old
+   * table (ConnectionService.list), which read the current-state table
+   * (one row per contact, windowed by sentAt): a re-send's earlier "sent"
+   * chart bar had no table row, and a row's Status/date reflected sentAt even
+   * when the chart's Accepted/Withdrawn/Expired bar for that transition
+   * landed on a completely different day.
+   */
+  static async list(p: ListConnectionEventsParams): Promise<{
+    data: unknown[];
+    metadata: { total: number; page: number; limit: number; totalPages: number };
+  }> {
+    const page = Math.max(1, p.page || 1);
+    const limit = Math.min(100, Math.max(1, p.limit || 10));
+    const sortBy = this.SORT_COLUMNS[p.sortBy ?? ""] ?? "occurredAt";
+    const sortOrder: "asc" | "desc" = p.sortOrder === "asc" ? "asc" : "desc";
+
+    const where: Prisma.ConnectionRequestEventWhereInput = {
+      occurredAt: { gte: p.from, lte: p.to },
+    };
+    if (p.userId) where.userId = p.userId;
+    else if (p.userIds) where.userId = { in: p.userIds };
+    if (p.actorLinkedinIds?.length) where.actorLinkedinId = { in: p.actorLinkedinIds };
+    else if (p.actorLinkedinId) where.actorLinkedinId = p.actorLinkedinId;
+    if (p.statuses?.length) where.toStatus = { in: p.statuses };
+    if (p.search) {
+      where.OR = [
+        { targetName: { contains: p.search, mode: "insensitive" } },
+        { actorName: { contains: p.search, mode: "insensitive" } },
+        { targetProfileUrl: { contains: p.search, mode: "insensitive" } },
+      ];
+    }
+
+    const [data, total] = await ConnectionEventRepository.findAndCountEvents(
+      where,
+      { [sortBy]: sortOrder } as Prisma.ConnectionRequestEventOrderByWithRelationInput,
+      (page - 1) * limit,
+      limit,
+    );
+
+    return {
+      data,
+      metadata: { total, page, limit, totalPages: Math.max(1, Math.ceil(total / limit)) },
+    };
   }
 }

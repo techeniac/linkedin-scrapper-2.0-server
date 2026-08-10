@@ -2,22 +2,8 @@
 import { ConnectionEventSource, ConnectionRequestStatus, Prisma } from "@prisma/client";
 import { ConnectionRepository } from "../repositories/connectionRepository";
 import { ConnectionEventService, estimateExpiryDate } from "./connectionEventService";
+import { RECONCILE_MIN_AGE_MINUTES } from "../config/env";
 
-// Read params for the public, paginated connections list.
-export interface ListConnectionsParams {
-  page: number;
-  limit: number;
-  sortBy?: string;
-  sortOrder?: "asc" | "desc";
-  search?: string;
-  userId?: string;
-  userIds?: string[]; // restrict to a set of owners (used when no single userId)
-  actorLinkedinId?: string; // the logged-in LinkedIn account that sent the request
-  actorLinkedinIds?: string[]; // multi-select account filter; takes precedence over actorLinkedinId
-  statuses?: ConnectionRequestStatus[]; // multi-select Status filter
-  sentFrom?: Date;
-  sentTo?: Date;
-}
 
 /**
  * LinkedIn connection-request tracking.
@@ -271,13 +257,17 @@ export class ConnectionService {
     let reappeared = 0;
 
     if (sentInvitationsFetched && sentListComplete === true) {
+      const minAgeFloor = new Date(now.getTime() - RECONCILE_MIN_AGE_MINUTES * 60 * 1000);
       const absentNow = candidates.filter(
         (r) =>
           !connectedMap.has(r.targetLinkedinId) &&
           !stillPendingSet.has(r.targetLinkedinId) &&
           // Outside the connections snapshot's coverage a late acceptance may
           // simply not be visible yet — don't call those expired.
-          (floor === null || r.sentAt >= floor),
+          (floor === null || r.sentAt >= floor) &&
+          // Give LinkedIn's own Sent list time to catch up with a send that
+          // just happened — see RECONCILE_MIN_AGE_MINUTES.
+          r.sentAt <= minAgeFloor,
       );
 
       for (const r of absentNow) {
@@ -407,56 +397,10 @@ export class ConnectionService {
     return { user, global };
   }
 
-  // Columns a client is allowed to sort by (guards against arbitrary orderBy).
-  private static readonly SORT_COLUMNS = new Set([
-    "sentAt",
-    "resolvedAt",
-    "status",
-    "targetName",
-    "createdAt",
-  ]);
-
-  /** Paginated / filtered / sorted list of connection rows (public read). */
-  static async list(p: ListConnectionsParams): Promise<{
-    data: unknown[];
-    metadata: { total: number; page: number; limit: number; totalPages: number };
-  }> {
-    const page = Math.max(1, p.page || 1);
-    const limit = Math.min(100, Math.max(1, p.limit || 10));
-    const sortBy = this.SORT_COLUMNS.has(p.sortBy ?? "") ? (p.sortBy as string) : "sentAt";
-    const sortOrder: "asc" | "desc" = p.sortOrder === "asc" ? "asc" : "desc";
-
-    const where: Prisma.ConnectionRequestWhereInput = {};
-    if (p.userId) where.userId = p.userId;
-    else if (p.userIds) where.userId = { in: p.userIds };
-    if (p.actorLinkedinIds?.length) where.actorLinkedinId = { in: p.actorLinkedinIds };
-    else if (p.actorLinkedinId) where.actorLinkedinId = p.actorLinkedinId;
-    if (p.statuses?.length) where.status = { in: p.statuses };
-    if (p.sentFrom || p.sentTo) {
-      where.sentAt = {};
-      if (p.sentFrom) where.sentAt.gte = p.sentFrom;
-      if (p.sentTo) where.sentAt.lte = p.sentTo;
-    }
-    if (p.search) {
-      where.OR = [
-        { targetName: { contains: p.search, mode: "insensitive" } },
-        { actorName: { contains: p.search, mode: "insensitive" } },
-        { targetProfileUrl: { contains: p.search, mode: "insensitive" } },
-      ];
-    }
-
-    const [data, total] = await ConnectionRepository.findAndCount(
-      where,
-      { [sortBy]: sortOrder } as Prisma.ConnectionRequestOrderByWithRelationInput,
-      (page - 1) * limit,
-      limit,
-    );
-
-    return {
-      data,
-      metadata: { total, page, limit, totalPages: Math.max(1, Math.ceil(total / limit)) },
-    };
-  }
+  // NOTE: the report table's paginated list moved to ConnectionEventService.
+  // list (reading connection_request_events, not this current-state table) —
+  // see that method's doc comment for why. This class keeps only the
+  // current-state COHORT series (getSeries below) and snapshot stats.
 
   /**
    * COHORT view: of the requests SENT in each bucket, how many are now in each

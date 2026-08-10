@@ -59,36 +59,6 @@ export class ConnectionRepository {
     return prisma.connectionRequest.groupBy({ by: ["status"], _count: { _all: true }, where });
   }
 
-  /** Paginated rows + total count, in one round trip. */
-  static findAndCount(
-    where: Prisma.ConnectionRequestWhereInput,
-    orderBy: Prisma.ConnectionRequestOrderByWithRelationInput,
-    skip: number,
-    take: number,
-  ) {
-    return prisma.$transaction([
-      prisma.connectionRequest.findMany({
-        where,
-        orderBy,
-        skip,
-        take,
-        select: {
-          id: true,
-          userId: true, // so the controller can map the owner to its HubSpot name
-          targetName: true,
-          targetProfileUrl: true,
-          targetLinkedinId: true,
-          actorName: true,
-          status: true,
-          sentAt: true,
-          resolvedAt: true,
-          user: { select: { name: true } }, // DB-name fallback
-        },
-      }),
-      prisma.connectionRequest.count({ where }),
-    ]);
-  }
-
   /**
    * COHORT view: of the requests SENT in each bucket, how many are now in
    * each status. Bucketed on sent_at over the current-state table — see
