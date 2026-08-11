@@ -26,7 +26,7 @@ router.post(
       .isString()
       .trim()
       .notEmpty()
-      .withMessage("targetLinkedinId is required"),
+      .withMessage("Couldn't identify who this connection request was for"),
     body("targetProfileUrl").optional().isString(),
     body("targetName").optional().isString(),
     body("actorLinkedinId").optional().isString(),
@@ -46,7 +46,7 @@ router.post(
       .isString()
       .trim()
       .notEmpty()
-      .withMessage("targetLinkedinId is required"),
+      .withMessage("Couldn't identify who this connection request was for"),
     body("status")
       // NOT_ACCEPTED still accepted so an older extension build doesn't start
       // failing validation; it is no longer written by anything.
