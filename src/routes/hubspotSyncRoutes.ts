@@ -38,7 +38,7 @@ router.get(
   authenticate,
   userAwareLimiter,
   [
-    query("contactId").trim().notEmpty().withMessage("contactId is required"),
+    query("contactId").trim().notEmpty().withMessage("No contact was selected"),
     validate,
   ],
   getTasks,
@@ -50,16 +50,16 @@ router.post(
   authenticate,
   userAwareLimiter,
   [
-    body("taskName").trim().notEmpty().withMessage("taskName is required"),
+    body("taskName").trim().notEmpty().withMessage("Task name is required"),
     body("priority")
       .isIn(["None", "Low", "Medium", "High"])
-      .withMessage("priority must be None, Low, Medium, or High"),
-    body("status").trim().notEmpty().withMessage("status is required"),
-    body("dueDate").optional().isISO8601().withMessage("Invalid date format"),
+      .withMessage("Priority must be None, Low, Medium, or High"),
+    body("status").trim().notEmpty().withMessage("Task status is required"),
+    body("dueDate").optional().isISO8601().withMessage("Please enter a valid due date"),
     body("time")
       .optional()
       .matches(/^\d{2}:\d{2}$/)
-      .withMessage("Invalid time format (HH:mm)"),
+      .withMessage("Please enter a valid time"),
     body("assignedTo").optional().trim(),
     body("comment").optional().trim(),
     body("contactId").optional().trim(),
@@ -74,17 +74,17 @@ router.patch(
   authenticate,
   userAwareLimiter,
   [
-    param("taskId").matches(/^\d+$/).withMessage("taskId must be numeric"),
-    body("taskName").trim().notEmpty().withMessage("taskName is required"),
+    param("taskId").matches(/^\d+$/).withMessage("That task could not be found"),
+    body("taskName").trim().notEmpty().withMessage("Task name is required"),
     body("priority")
       .isIn(["None", "Low", "Medium", "High"])
-      .withMessage("priority must be None, Low, Medium, or High"),
-    body("status").trim().notEmpty().withMessage("status is required"),
-    body("dueDate").optional().isISO8601().withMessage("Invalid date format"),
+      .withMessage("Priority must be None, Low, Medium, or High"),
+    body("status").trim().notEmpty().withMessage("Task status is required"),
+    body("dueDate").optional().isISO8601().withMessage("Please enter a valid due date"),
     body("time")
       .optional()
       .matches(/^\d{2}:\d{2}$/)
-      .withMessage("Invalid time format (HH:mm)"),
+      .withMessage("Please enter a valid time"),
     body("assignedTo")
       .notEmpty()
       .trim()
@@ -100,7 +100,7 @@ router.delete(
   "/tasks/:taskId",
   authenticate,
   userAwareLimiter,
-  [param("taskId").matches(/^\d+$/).withMessage("taskId must be numeric"), validate],
+  [param("taskId").matches(/^\d+$/).withMessage("That task could not be found"), validate],
   deleteTask,
 );
 
@@ -113,8 +113,8 @@ router.get(
   authenticate,
   userAwareLimiter,
   [
-    query("contactId").trim().notEmpty().withMessage("contactId is required"),
-    query("limit").optional().isInt({ min: 1, max: 50 }).withMessage("limit must be 1-50"),
+    query("contactId").trim().notEmpty().withMessage("No contact was selected"),
+    query("limit").optional().isInt({ min: 1, max: 50 }).withMessage("Limit must be between 1 and 50"),
     query("after").optional().trim(),
     validate,
   ],
@@ -127,11 +127,11 @@ router.patch(
   authenticate,
   userAwareLimiter,
   [
-    param("noteId").matches(/^\d+$/).withMessage("noteId must be numeric"),
-    body("notes").trim().notEmpty().withMessage("notes is required"),
-    body("noteTitle").optional().trim().isLength({ max: 200 }),
-    body("dealValue").optional().trim().isLength({ max: 100 }),
-    body("nextStep").optional().trim().isLength({ max: 500 }),
+    param("noteId").matches(/^\d+$/).withMessage("That note could not be found"),
+    body("notes").trim().notEmpty().withMessage("Note text is required"),
+    body("noteTitle").optional().trim().isLength({ max: 200 }).withMessage("Note title is too long"),
+    body("dealValue").optional().trim().isLength({ max: 100 }).withMessage("Deal value is too long"),
+    body("nextStep").optional().trim().isLength({ max: 500 }).withMessage("Next step is too long"),
     validate,
   ],
   updateNote,
@@ -142,7 +142,7 @@ router.delete(
   "/notes/:noteId",
   authenticate,
   userAwareLimiter,
-  [param("noteId").matches(/^\d+$/).withMessage("noteId must be numeric"), validate],
+  [param("noteId").matches(/^\d+$/).withMessage("That note could not be found"), validate],
   deleteNote,
 );
 
@@ -152,11 +152,11 @@ router.post(
   authenticate,
   userAwareLimiter,
   [
-    body("notes").trim().notEmpty().withMessage("notes is required"),
-    body("contactId").trim().notEmpty().withMessage("contactId is required"),
-    body("noteTitle").optional().trim().isLength({ max: 200 }),
-    body("dealValue").optional().trim().isLength({ max: 100 }),
-    body("nextStep").optional().trim().isLength({ max: 500 }),
+    body("notes").trim().notEmpty().withMessage("Note text is required"),
+    body("contactId").trim().notEmpty().withMessage("No contact was selected"),
+    body("noteTitle").optional().trim().isLength({ max: 200 }).withMessage("Note title is too long"),
+    body("dealValue").optional().trim().isLength({ max: 100 }).withMessage("Deal value is too long"),
+    body("nextStep").optional().trim().isLength({ max: 500 }).withMessage("Next step is too long"),
     validate,
   ],
   createNote,
@@ -171,11 +171,11 @@ router.get(
     query("username")
       .trim()
       .notEmpty()
-      .withMessage("username is required")
+      .withMessage("No LinkedIn profile was found on this page")
       .isLength({ max: 100 })
-      .withMessage("username too long")
+      .withMessage("This LinkedIn profile link looks too long to be valid")
       .matches(/^[a-zA-Z0-9\-_%]+$/)
-      .withMessage("username contains invalid characters"),
+      .withMessage("This LinkedIn profile link contains characters we don't recognize"),
     validate,
   ],
   checkProfile,
@@ -187,56 +187,60 @@ router.post(
   authenticate,
   userAwareLimiter,
   [
-    body("contact").isObject().withMessage("contact object is required"),
+    body("contact").isObject().withMessage("Contact details are required"),
     body("contact.name")
       .trim()
       .notEmpty()
-      .withMessage("contact.name is required")
+      .withMessage("Contact name is required")
       .isLength({ max: 200 })
-      .withMessage("name too long"),
+      .withMessage("Contact name is too long"),
     body("contact.profileUrl")
       .trim()
       .notEmpty()
-      .withMessage("contact.profileUrl is required")
+      .withMessage("This profile's LinkedIn URL is required")
       .isURL()
-      .withMessage("profileUrl must be valid URL"),
+      .withMessage("This profile's LinkedIn URL doesn't look valid"),
     body("contact.email")
       .optional({ values: "falsy" })
       .trim()
       .isEmail()
-      .withMessage("Invalid email"),
+      .withMessage("Please enter a valid email address"),
     body("contact.phone")
       .optional({ values: "falsy" })
       .trim()
       .isLength({ max: 50 })
-      .withMessage("phone too long"),
+      .withMessage("Phone number is too long"),
     body("contact.website")
       .optional({ values: "falsy" })
       .trim()
       .isURL()
-      .withMessage("Invalid website URL"),
-    body("company")
-      .isObject()
-      .withMessage("company Associated with user profile is required"),
+      .withMessage("Please enter a valid website URL"),
+    // Optional: a profile's current position may have no linkable LinkedIn
+    // company page (private/unlisted company, or no current position at
+    // all) — the extension intentionally still syncs the contact on its own
+    // in that case (ProfileCard.tsx) rather than blocking the whole sync,
+    // sending an empty-fields company placeholder. syncLead normalizes that
+    // down to no company at all; this validation only needs to check shape
+    // when a REAL company name is actually present.
+    body("company").optional().isObject().withMessage("Company details must be an object"),
     body("company.name")
-      .notEmpty()
-      .withMessage("company name is required")
+      .optional({ values: "falsy" })
       .trim()
       .isLength({ max: 200 })
-      .withMessage("company name too long"),
+      .withMessage("Company name is too long"),
     body("company.companyUrl")
       .optional({ values: "falsy" })
       .trim()
       .isURL()
-      .withMessage("Invalid company URL"),
-    body("contact.headline").optional().trim().isLength({ max: 500 }).withMessage("headline too long"),
-    body("contact.selectedRole").optional().trim().isLength({ max: 200 }).withMessage("selectedRole too long"),
-    body("contact.selectedCompany").optional().trim().isLength({ max: 200 }).withMessage("selectedCompany too long"),
-    body("contact.connectedOn").optional().trim().isLength({ max: 100 }).withMessage("connectedOn too long"),
-    body("contact.experiences").optional().isArray({ max: 50 }).withMessage("experiences array too large"),
-    body("contact.experiences.*.role").optional().trim().isLength({ max: 200 }).withMessage("experience role too long"),
-    body("contact.experiences.*.companyLine").optional().trim().isLength({ max: 200 }).withMessage("experience companyLine too long"),
-    body("contact.experiences.*.dates").optional().trim().isLength({ max: 100 }).withMessage("experience dates too long"),
+      .withMessage("Please enter a valid company URL"),
+    body("contact.headline").optional().trim().isLength({ max: 500 }).withMessage("Headline is too long"),
+    body("contact.selectedRole").optional().trim().isLength({ max: 200 }).withMessage("Job title is too long"),
+    body("contact.selectedCompany").optional().trim().isLength({ max: 200 }).withMessage("Company name is too long"),
+    body("contact.connectedOn").optional().trim().isLength({ max: 100 }).withMessage("Connected-on date is too long"),
+    body("contact.experiences").optional().isArray({ max: 50 }).withMessage("This profile has too many work experiences to sync"),
+    body("contact.experiences.*.role").optional().trim().isLength({ max: 200 }).withMessage("A work experience's job title is too long"),
+    body("contact.experiences.*.companyLine").optional().trim().isLength({ max: 200 }).withMessage("A work experience's company name is too long"),
+    body("contact.experiences.*.dates").optional().trim().isLength({ max: 100 }).withMessage("A work experience's dates are too long"),
     validate,
   ],
   syncLead,
@@ -254,24 +258,24 @@ router.get(
     query("page")
       .optional()
       .isInt({ min: 1 })
-      .withMessage("page must be a positive integer"),
+      .withMessage("Page number must be a positive number"),
     query("limit")
       .optional()
       .isInt({ min: 1, max: 200 })
-      .withMessage("limit must be between 1 and 200"),
+      .withMessage("Limit must be between 1 and 200"),
     query("search")
       .optional()
       .trim()
       .isLength({ max: 200 })
-      .withMessage("search too long"),
+      .withMessage("Search text is too long"),
     query("sortBy")
       .optional()
       .isIn(["firstname", "lastname", "email", "createdate", "lastmodifieddate"])
-      .withMessage("sortBy must be one of: firstname, lastname, email, createdate, lastmodifieddate"),
+      .withMessage("Sort field must be one of: first name, last name, email, created date, last modified date"),
     query("sortOrder")
       .optional()
       .isIn(["ascending", "descending", "ASCENDING", "DESCENDING"])
-      .withMessage("sortOrder must be ascending or descending"),
+      .withMessage("Sort order must be ascending or descending"),
     validate,
   ],
   getContactsByOwner,
@@ -294,36 +298,36 @@ router.patch(
     query("username")
       .trim()
       .notEmpty()
-      .withMessage("username is required")
+      .withMessage("No LinkedIn profile was found on this page")
       .isLength({ max: 100 })
-      .withMessage("username too long")
+      .withMessage("This LinkedIn profile link looks too long to be valid")
       .matches(/^[a-zA-Z0-9\-_%]+$/)
-      .withMessage("username contains invalid characters"),
+      .withMessage("This LinkedIn profile link contains characters we don't recognize"),
     body("email")
       .optional({ values: "falsy" })
       .trim()
       .isEmail()
-      .withMessage("Invalid email"),
+      .withMessage("Please enter a valid email address"),
     body("phone")
       .optional({ values: "falsy" })
       .trim()
       .isLength({ max: 50 })
-      .withMessage("phone too long"),
+      .withMessage("Phone number is too long"),
     body("owner")
       .optional({ values: "falsy" })
       .trim()
       .isLength({ max: 50 })
-      .withMessage("owner ID too long"),
+      .withMessage("Owner selection is invalid"),
     body("lifecycle")
       .optional({ values: "falsy" })
       .trim()
       .isLength({ max: 50 })
-      .withMessage("lifecycle too long"),
+      .withMessage("Lifecycle stage is invalid"),
     body("company")
       .optional({ values: "falsy" })
       .trim()
       .isLength({ max: 200 })
-      .withMessage("company too long"),
+      .withMessage("Company name is too long"),
     validate,
   ],
   updateContact,
@@ -338,45 +342,45 @@ router.post(
     body("conversationKey")
       .trim()
       .notEmpty()
-      .withMessage("conversationKey is required"),
+      .withMessage("Couldn't identify this LinkedIn conversation"),
     body("messages")
       .isArray({ min: 1, max: 500 })
-      .withMessage("messages array is required, must not be empty, and cannot exceed 500 items"),
+      .withMessage("No messages to sync, or too many at once (max 500)"),
     body("messages.*.text")
       .trim()
       .notEmpty()
-      .withMessage("message text is required"),
+      .withMessage("A message with no text can't be synced"),
     body("messages.*.sentAt")
       .trim()
       .notEmpty()
       .isISO8601()
-      .withMessage("message sentAt must be valid ISO date"),
+      .withMessage("A message has an invalid timestamp"),
     body("messages.*.sender.name")
       .trim()
       .notEmpty()
-      .withMessage("sender name is required"),
+      .withMessage("A message is missing the sender's name"),
     body("messages.*.sender.profileUrl")
       .trim()
       .notEmpty()
       .isURL()
-      .withMessage("sender profileUrl must be valid URL"),
+      .withMessage("A message has an invalid sender LinkedIn URL"),
     body("messages.*.sender.distance")
       .trim()
       .notEmpty()
-      .withMessage("sender distance is required"),
+      .withMessage("A message is missing the sender's connection info"),
     body("messages.*.receiver.name")
       .trim()
       .notEmpty()
-      .withMessage("receiver name is required"),
+      .withMessage("A message is missing the recipient's name"),
     body("messages.*.receiver.profileUrl")
       .trim()
       .notEmpty()
       .isURL()
-      .withMessage("receiver profileUrl must be valid URL"),
+      .withMessage("A message has an invalid recipient LinkedIn URL"),
     body("messages.*.receiver.distance")
       .trim()
       .notEmpty()
-      .withMessage("receiver distance is required"),
+      .withMessage("A message is missing the recipient's connection info"),
     validate,
   ],
   upsertMessages,

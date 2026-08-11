@@ -23,9 +23,17 @@ export const syncLead = async (
     const { ownerId, syncService } =
       await HubSpotContextService.getContext(req.user!.id);
 
+    // The extension sends an empty-fields placeholder ({name:"", ...}), not
+    // an absent company, when a profile has no linkable LinkedIn company
+    // page — that's a truthy object, so syncFullLead's own `if (company)`
+    // guard wouldn't skip it. Normalize here so a nameless placeholder is
+    // treated the same as no company at all, instead of attempting to
+    // upsert a company with no name in HubSpot.
+    const normalizedCompany = company?.name?.trim() ? company : null;
+
     const result = await syncService.syncFullLead(
       contact,
-      company || null,
+      normalizedCompany,
       ownerId,
     );
 
