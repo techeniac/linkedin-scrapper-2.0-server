@@ -8,19 +8,17 @@ import {
   getMissedFollowUps,
 } from "../controllers/publicController";
 import { requirePublicApiKey } from "../middlewares/publicApiKey";
+import { authenticate } from "../middlewares/auth";
 
-// PUBLIC, read-only router — intentionally NOT behind `authenticate`. Serves
-// global connection/message data to the Chitragupt reporting frontend (no login
-// yet; RBAC to be added later). Still inherits the global IP `apiLimiter` from
-// routes/index.ts. Do NOT add write endpoints here.
-//
-// These responses include participant names and LinkedIn profile URLs, so on a
-// public deployment they are readable by anyone who knows the hostname. The
-// gate below is a no-op until PUBLIC_API_KEY is configured — set that env var
-// to close the endpoints once the reporting frontend can send the header.
+// Read-only router serving global connection/message data to the reporting
+// frontend. Gated behind `authenticate` (same JWT/users-table auth as the
+// rest of the API) plus the optional shared-secret `requirePublicApiKey`
+// no-op layer. Still inherits the global IP `apiLimiter` from routes/index.ts.
+// Do NOT add write endpoints here.
 const router = Router();
 
 router.use(requirePublicApiKey);
+router.use(authenticate);
 
 router.get("/summary", getSummary);
 router.get("/filters", getFilters);
