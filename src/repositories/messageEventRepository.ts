@@ -36,9 +36,9 @@ const bucketOf = (granularity?: "day" | "week" | "month") =>
 
 const ownerFilterSql = (opts: Pick<SeriesFilterOpts, "userId" | "restrictUserIds">) =>
   opts.userId
-    ? Prisma.sql`AND user_id = ${opts.userId}`
+    ? Prisma.sql`AND COALESCE(resolved_owner_id, user_id) = ${opts.userId}`
     : opts.restrictUserIds
-      ? Prisma.sql`AND user_id = ANY(${opts.restrictUserIds})`
+      ? Prisma.sql`AND COALESCE(resolved_owner_id, user_id) = ANY(${opts.restrictUserIds})`
       : Prisma.empty;
 
 const accountFilterSql = (opts: Pick<SeriesFilterOpts, "selfLinkedinId" | "selfLinkedinIds">) =>
@@ -49,7 +49,12 @@ const accountFilterSql = (opts: Pick<SeriesFilterOpts, "selfLinkedinId" | "selfL
       : Prisma.empty;
 
 export interface QualifyingEventRow {
+  // The scraper who recorded this event — used ONLY to join back to
+  // MessageActivity for participant/self display-name resolution.
   userId: string;
+  // The effective owner (resolved HubSpot owner, or the scraper as
+  // fallback) — this is what report grouping/output should use.
+  displayOwnerId: string;
   conversationKey: string;
   occurredAt: Date;
   participantLinkedinId: string | null;
@@ -103,6 +108,23 @@ export class MessageEventRepository {
   }
 
   /**
+   * Stamps the resolved owner (see MessageOwnerResolverService) onto every
+   * message_events row for this conversation — all of them, not just the
+   * newest, so a conversation's whole history reports under the same owner
+   * once resolved.
+   */
+  static async updateResolvedOwner(
+    conversationKey: string,
+    resolvedOwnerId: string | null,
+    attributionSource: "hubspot" | "fallback",
+  ): Promise<void> {
+    await prisma.messageEvent.updateMany({
+      where: { conversationKey },
+      data: { resolvedOwnerId, attributionSource },
+    });
+  }
+
+  /**
    * Per-bucket counts over the event history — see MessageEventService.getSeries.
    * Counts DISTINCT conversations (people), not raw message events: 3 replies
    * from the same person in one day count once, not 3 times — matches how the
@@ -145,7 +167,7 @@ export class MessageEventRepository {
 
     return prisma.$queryRaw`
       SELECT to_char(date_trunc(${bucket}, occurred_at), 'YYYY-MM-DD') AS date,
-             user_id AS "userId",
+             COALESCE(resolved_owner_id, user_id) AS "userId",
              COUNT(DISTINCT conversation_key) FILTER (WHERE type = 'SENT' AND is_first_touch)::int  AS fresh,
              COUNT(DISTINCT conversation_key) FILTER (WHERE type = 'SENT' AND is_follow_up)::int   AS followups,
              COUNT(DISTINCT conversation_key) FILTER (WHERE type = 'SENT')::int                   AS sent,
@@ -153,9 +175,9 @@ export class MessageEventRepository {
              COUNT(DISTINCT conversation_key) FILTER (WHERE type = 'RECEIVED' AND is_first_reply)::int AS replied
       FROM message_events
       WHERE occurred_at >= ${from} AND occurred_at <= ${to}
-        AND user_id = ANY(${ownerIds})
+        AND COALESCE(resolved_owner_id, user_id) = ANY(${ownerIds})
         ${accountFilter}
-      GROUP BY 1, user_id
+      GROUP BY 1, COALESCE(resolved_owner_id, user_id)
       ORDER BY 1
     `;
   }
@@ -190,7 +212,7 @@ export class MessageEventRepository {
 
     return prisma.$queryRaw`
       SELECT to_char(date_trunc(${bucket}, occurred_at), 'YYYY-MM-DD') AS date,
-             user_id AS "userId",
+             COALESCE(resolved_owner_id, user_id) AS "userId",
              self_linkedin_id AS "accountId",
              COUNT(DISTINCT conversation_key) FILTER (WHERE type = 'SENT' AND is_first_touch)::int  AS fresh,
              COUNT(DISTINCT conversation_key) FILTER (WHERE type = 'SENT' AND is_follow_up)::int   AS followups,
@@ -199,9 +221,9 @@ export class MessageEventRepository {
              COUNT(DISTINCT conversation_key) FILTER (WHERE type = 'RECEIVED' AND is_first_reply)::int AS replied
       FROM message_events
       WHERE occurred_at >= ${from} AND occurred_at <= ${to}
-        AND user_id = ANY(${ownerIds})
+        AND COALESCE(resolved_owner_id, user_id) = ANY(${ownerIds})
         ${accountFilter}
-      GROUP BY 1, user_id, self_linkedin_id
+      GROUP BY 1, COALESCE(resolved_owner_id, user_id), self_linkedin_id
       ORDER BY 1
     `;
   }
@@ -256,6 +278,7 @@ export class MessageEventRepository {
     const rows = await prisma.$queryRaw<
       Array<{
         user_id: string;
+        display_owner_id: string;
         conversation_key: string;
         occurred_at: Date;
         participant_linkedin_id: string | null;
@@ -263,7 +286,8 @@ export class MessageEventRepository {
         kind: "FRESH" | "FOLLOW_UP" | "REPLIED";
       }>
     >`
-      SELECT user_id, conversation_key, occurred_at,
+      SELECT user_id, COALESCE(resolved_owner_id, user_id) AS display_owner_id,
+             conversation_key, occurred_at,
              participant_linkedin_id, self_linkedin_id,
              CASE
                WHEN type = 'SENT' AND is_first_touch THEN 'FRESH'
@@ -283,6 +307,7 @@ export class MessageEventRepository {
 
     return rows.map(r => ({
       userId: r.user_id,
+      displayOwnerId: r.display_owner_id,
       conversationKey: r.conversation_key,
       occurredAt: r.occurred_at,
       participantLinkedinId: r.participant_linkedin_id,
