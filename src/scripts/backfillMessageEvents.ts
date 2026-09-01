@@ -161,7 +161,7 @@ async function main() {
             ${r.isFirstTouch}, ${r.isFollowUp}, ${r.isFirstReply}, NULL,
             NULL, ${r.participantLinkedinId}, ${r.selfLinkedinId}, NOW()
           )
-          ON CONFLICT (user_id, conversation_key, message_id) DO NOTHING
+          ON CONFLICT (conversation_key, message_id) DO NOTHING
         `,
       ),
     );

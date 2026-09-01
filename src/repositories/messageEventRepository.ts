@@ -91,7 +91,7 @@ export class MessageEventRepository {
             ${r.isFirstTouch}, ${r.isFollowUp}, ${r.isFirstReply}, ${r.respondsToAt},
             ${r.selfTimeZone}, ${r.participantLinkedinId}, ${r.selfLinkedinId}, ${r.text}, NOW()
           )
-          ON CONFLICT (user_id, conversation_key, message_id) DO UPDATE SET
+          ON CONFLICT (conversation_key, message_id) DO UPDATE SET
             is_first_touch = message_events.is_first_touch AND EXCLUDED.is_first_touch,
             is_first_reply = message_events.is_first_reply AND EXCLUDED.is_first_reply,
             is_follow_up   = message_events.is_follow_up   OR  EXCLUDED.is_follow_up,

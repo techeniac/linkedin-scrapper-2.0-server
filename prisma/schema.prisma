@@ -286,7 +286,7 @@ model MessageEvent {
   attributionSource String?        @map("attribution_source")
   createdAt       DateTime         @default(now()) @map("created_at")
 
-  @@unique([userId, conversationKey, messageId])
+  @@unique([conversationKey, messageId])
   @@index([userId, occurredAt])
   @@index([type, occurredAt])
   @@index([userId, type, occurredAt])
