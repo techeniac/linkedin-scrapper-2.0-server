@@ -9,7 +9,10 @@ import { Prisma } from "@prisma/client";
 import prisma from "../config/prisma";
 
 export interface LastEventRow {
+  // Effective owner — see MessageEventRepository/LateMessageRepository.
   userId: string;
+  // Raw scraper id — used ONLY to join back to MessageActivity.
+  scraperUserId: string;
   conversationKey: string;
   type: "SENT" | "RECEIVED";
   occurredAt: Date;
@@ -42,9 +45,9 @@ export class MissedFollowUpRepository {
    */
   static async findLastEventPerConversation(opts: QueryOpts): Promise<LastEventRow[]> {
     const ownerFilter = opts.userId
-      ? Prisma.sql`AND user_id = ${opts.userId}`
+      ? Prisma.sql`AND COALESCE(resolved_owner_id, user_id) = ${opts.userId}`
       : opts.restrictUserIds
-        ? Prisma.sql`AND user_id = ANY(${opts.restrictUserIds})`
+        ? Prisma.sql`AND COALESCE(resolved_owner_id, user_id) = ANY(${opts.restrictUserIds})`
         : Prisma.empty;
     const accountFilter = opts.selfLinkedinIds?.length
       ? Prisma.sql`AND self_linkedin_id = ANY(${opts.selfLinkedinIds})`
@@ -52,9 +55,16 @@ export class MissedFollowUpRepository {
         ? Prisma.sql`AND self_linkedin_id = ${opts.selfLinkedinId}`
         : Prisma.empty;
 
+    // Grouped by the EFFECTIVE owner (not the raw scraper) — see the design
+    // doc: a conversation has exactly one real owner once resolved, so the
+    // backlog should show one "last event" per (effective owner,
+    // conversation), not fragment by whichever scraper touched which
+    // message. `user_id` (the raw scraper of the last event) is still
+    // carried through as scraperUserId for the MessageActivity join.
     const rows = await prisma.$queryRaw<
       Array<{
         user_id: string;
+        display_owner_id: string;
         conversation_key: string;
         type: "SENT" | "RECEIVED";
         occurred_at: Date;
@@ -62,16 +72,18 @@ export class MissedFollowUpRepository {
         self_linkedin_id: string | null;
       }>
     >`
-      SELECT DISTINCT ON (user_id, conversation_key)
-        user_id, conversation_key, type, occurred_at,
+      SELECT DISTINCT ON (COALESCE(resolved_owner_id, user_id), conversation_key)
+        user_id, COALESCE(resolved_owner_id, user_id) AS display_owner_id,
+        conversation_key, type, occurred_at,
         participant_linkedin_id, self_linkedin_id
       FROM message_events
       WHERE true ${ownerFilter} ${accountFilter}
-      ORDER BY user_id, conversation_key, occurred_at DESC, (type = 'RECEIVED') DESC
+      ORDER BY COALESCE(resolved_owner_id, user_id), conversation_key, occurred_at DESC, (type = 'RECEIVED') DESC
     `;
 
     return rows.map(r => ({
-      userId: r.user_id,
+      userId: r.display_owner_id,
+      scraperUserId: r.user_id,
       conversationKey: r.conversation_key,
       type: r.type,
       occurredAt: r.occurred_at,
