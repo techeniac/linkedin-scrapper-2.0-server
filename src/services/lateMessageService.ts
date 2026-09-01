@@ -180,7 +180,10 @@ function dedupeByConversationPerDay(rows: LateRow[]): LateRow[] {
 }
 
 export interface LateRow {
+  // Effective owner — see ReplyCandidateRow/FollowUpRow in lateMessageRepository.ts.
   userId: string;
+  // Raw scraper id — used ONLY to join back to MessageActivity.
+  scraperUserId: string;
   conversationKey: string;
   occurredAt: Date;
   respondsToAt: Date;
@@ -409,17 +412,18 @@ export class LateMessageService {
     const page_ = rows.slice((page - 1) * limit, (page - 1) * limit + limit);
 
     // Batch-resolve participant/self display identity from MessageActivity —
-    // MessageEvent only stores ids, not names/urls.
+    // it's keyed by the SCRAPER's userId, not the effective owner, so the
+    // join must use r.scraperUserId here, never r.userId.
     const pairs = Array.from(
-      new Map(page_.map((r) => [`${r.userId}:${r.conversationKey}`, r])).values(),
-    );
+      new Map(page_.map((r) => [`${r.scraperUserId}:${r.conversationKey}`, r])).values(),
+    ).map((r) => ({ userId: r.scraperUserId, conversationKey: r.conversationKey }));
     const activities = await LateMessageRepository.findActivityIdentities(pairs);
     const byKey = new Map(
       activities.map((a) => [`${a.userId}:${a.conversationKey}`, a]),
     );
 
     const data = page_.map((r) => {
-      const activity = byKey.get(`${r.userId}:${r.conversationKey}`);
+      const activity = byKey.get(`${r.scraperUserId}:${r.conversationKey}`);
       return {
         userId: r.userId,
         conversationKey: r.conversationKey,
