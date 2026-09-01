@@ -16,7 +16,8 @@
     "prisma:status": "prisma migrate status",
     "test": "jest",
     "backfill:connection-events": "ts-node --transpile-only src/scripts/backfillConnectionRequestEvents.ts",
-    "backfill:message-events": "ts-node --transpile-only src/scripts/backfillMessageEvents.ts"
+    "backfill:message-events": "ts-node --transpile-only src/scripts/backfillMessageEvents.ts",
+    "dedupe:message-events": "ts-node --transpile-only src/scripts/dedupeMessageEvents.ts"
   },
   "keywords": [
     "nodejs",
