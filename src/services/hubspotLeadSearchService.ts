@@ -74,12 +74,22 @@ export interface ForgottenLeadContact {
   profileUrl: string;
 }
 
-/** Paginated list of the actual matching contacts, for the report's supporting table. */
+/**
+ * Paginated list of the actual matching contacts, for the report's supporting
+ * table. `connectedOnSource`, when given, narrows to contacts whose
+ * `contact_source` property equals it exactly — the "Connected On" filter
+ * (which rep's LinkedIn profile originally sourced this contact). Table-only:
+ * the daily snapshot (`countForgottenLeads`, used for the chart) is
+ * deliberately NOT split by this dimension, since the snapshot only stores
+ * one count per (owner, day) — adding a per-source breakdown there would need
+ * a schema change, not justified for a filter that only narrows a live table.
+ */
 export async function searchForgottenLeads(
   token: string,
   hubspotOwnerId: string,
   page: number,
   limit: number,
+  connectedOnSource?: string,
 ): Promise<{ contacts: ForgottenLeadContact[]; total: number }> {
   const after = String(Math.max(0, (page - 1) * limit));
   try {
@@ -91,6 +101,9 @@ export async function searchForgottenLeads(
             filters: [
               { propertyName: "hubspot_owner_id", operator: "EQ", value: hubspotOwnerId },
               ...buildFilterGroups()[0].filters,
+              ...(connectedOnSource
+                ? [{ propertyName: "contact_source", operator: "EQ", value: connectedOnSource }]
+                : []),
             ],
           },
         ],

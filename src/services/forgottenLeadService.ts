@@ -124,6 +124,7 @@ export class ForgottenLeadService {
     page: number;
     limit: number;
     owners: OwnerRef[]; // already scoped to the requested/allowed owners
+    connectedOnSource?: string; // "Connected On" filter — see hubspotLeadSearchService.searchForgottenLeads
   }): Promise<{
     data: Array<{ id: string; userId: string; name: string; email?: string; company?: string; leadStatus?: string; profileUrl: string }>;
     metadata: { total: number; page: number; limit: number; totalPages: number; partial: boolean };
@@ -131,10 +132,12 @@ export class ForgottenLeadService {
     const page = Math.max(1, params.page || 1);
     const limit = Math.min(100, Math.max(1, params.limit || 10));
 
-    // Same owner scope -> same cached combined list for LIST_CACHE_TTL_MS, so
-    // paging through the table doesn't re-hit HubSpot (and doesn't risk a
-    // different total) on every click — see the cache's doc comment above.
-    const cacheKey = params.owners.map((o) => o.id).sort().join(",");
+    // Same owner scope + same Connected On filter -> same cached combined
+    // list for LIST_CACHE_TTL_MS, so paging through the table doesn't re-hit
+    // HubSpot (and doesn't risk a different total) on every click — see the
+    // cache's doc comment above. The filter value is part of the key because
+    // a different filter genuinely means a different result set to cache.
+    const cacheKey = `${params.owners.map((o) => o.id).sort().join(",")}::${params.connectedOnSource ?? ""}`;
     const cached = listCache.get(cacheKey);
     let entry: ListCacheEntry;
     if (cached && Date.now() - cached.at < LIST_CACHE_TTL_MS) {
@@ -152,7 +155,13 @@ export class ForgottenLeadService {
             let page_ = 1;
             const pageSize = 200;
             while (all.length < 1000) {
-              const { contacts, total } = await searchForgottenLeads(token, owner.hubspotOwnerId, page_, pageSize);
+              const { contacts, total } = await searchForgottenLeads(
+                token,
+                owner.hubspotOwnerId,
+                page_,
+                pageSize,
+                params.connectedOnSource,
+              );
               all.push(...contacts.map((c) => mapContact(c, owner.id)));
               if (all.length >= total || contacts.length === 0) break;
               page_++;

@@ -6,6 +6,8 @@ import { MessageEventService } from "../services/messageEventService";
 import { LateMessageService } from "../services/lateMessageService";
 import { MissedFollowUpService } from "../services/missedFollowUpService";
 import { ForgottenLeadService } from "../services/forgottenLeadService";
+import { HubSpotContactService } from "../services/hubspotContactService";
+import { HubSpotOAuthService } from "../services/hubspotOAuthService";
 import {
   getConnectedOwners,
   getConnectedOwnerIds,
@@ -103,6 +105,56 @@ const getLinkedinAccountsData = async (
 const getLinkedinAccounts = async (ownerIds: string[]): Promise<LinkedinAccount[]> =>
   (await getLinkedinAccountsData(ownerIds)).accounts;
 
+// "Connected On" option list for the Forgotten Active Leads report's filter —
+// HubSpot's `contact_source` property (which rep's LinkedIn profile sourced
+// a contact; already surfaced elsewhere in this codebase under the same
+// "connectedOnSource" name — see hubspotContactService.ts's
+// getPropertyOptions/findContactByProfileUrl). Portal-specific and mutable
+// (a new rep = a new option), so fetched from HubSpot rather than hardcoded,
+// same stale-while-revalidate cache shape as the LinkedIn-accounts cache
+// above — any one connected owner's token is enough, since this is a
+// portal-wide property definition, not per-owner data.
+type FilterOption = { value: string; label: string };
+const CO_TTL_MS = 30 * 60 * 1000;
+let coCache: { at: number; options: FilterOption[] } | null = null;
+let coInFlight: Promise<FilterOption[]> | null = null;
+
+const loadConnectedOnSources = async (ownerIds: string[]): Promise<FilterOption[]> => {
+  if (!ownerIds.length) return [];
+  try {
+    const token = await HubSpotOAuthService.getValidAccessToken(ownerIds[0]);
+    const service = new HubSpotContactService("https://api.hubapi.com", {
+      Authorization: `Bearer ${token}`,
+    });
+    const { connectedOnSources } = await service.getPropertyOptions();
+    return connectedOnSources;
+  } catch {
+    return []; // one owner's token trouble shouldn't break the whole filters response
+  }
+};
+
+const refreshConnectedOnSources = (ownerIds: string[]): Promise<FilterOption[]> => {
+  if (!coInFlight) {
+    coInFlight = loadConnectedOnSources(ownerIds)
+      .then((options) => {
+        coCache = { at: Date.now(), options };
+        return options;
+      })
+      .finally(() => {
+        coInFlight = null;
+      });
+  }
+  return coInFlight;
+};
+
+const getConnectedOnSources = async (ownerIds: string[]): Promise<FilterOption[]> => {
+  if (!coCache) return refreshConnectedOnSources(ownerIds); // cold — block once
+  if (Date.now() - coCache.at >= CO_TTL_MS) {
+    void refreshConnectedOnSources(ownerIds).catch(() => {}); // stale — refresh in bg
+  }
+  return coCache.options; // warm — instant
+};
+
 // These endpoints are intentionally UNAUTHENTICATED (see publicRoutes.ts): they
 // serve read-only reporting data to the Chitragupt frontend (no login yet).
 // Scope is limited to HubSpot-CONNECTED owners only, and owner names come from
@@ -176,10 +228,14 @@ export const getFilters = async (
 ): Promise<void> => {
   try {
     const owners = await getConnectedOwners();
-    const { accounts: linkedinAccounts, pairs: ownerAccounts } = await getLinkedinAccountsData(
-      owners.map((o) => o.id),
+    const ownerIds = owners.map((o) => o.id);
+    const { accounts: linkedinAccounts, pairs: ownerAccounts } = await getLinkedinAccountsData(ownerIds);
+    const connectedOnSources = await getConnectedOnSources(ownerIds);
+    successResponse(
+      res,
+      { users: owners, linkedinAccounts, ownerAccounts, connectedOnSources },
+      "Filters retrieved",
     );
-    successResponse(res, { users: owners, linkedinAccounts, ownerAccounts }, "Filters retrieved");
   } catch (error) {
     next(error);
   }
@@ -756,6 +812,7 @@ export const getForgottenLeads = async (
       page: toInt(req.query.page, 1),
       limit: toInt(req.query.limit, 10),
       owners: scopedOwners.map((o) => ({ id: o.id, hubspotOwnerId: o.hubspotOwnerId })),
+      connectedOnSource: toStr(req.query.connectedOnSource),
     });
 
     const nameMap = await getConnectedOwnerNameMap();
