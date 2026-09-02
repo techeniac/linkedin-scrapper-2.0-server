@@ -5,7 +5,6 @@ import {
   LATE_MSG_THRESHOLD_HOURS,
   LATE_MSG_QUIET_START_HOUR,
   LATE_MSG_QUIET_END_HOUR,
-  LATE_MSG_EDGE_MODE,
   LATE_FOLLOWUP_THRESHOLD_DAYS,
 } from "../config/env";
 
@@ -19,19 +18,20 @@ import {
  * and "re-ping a cold prospect" have completely different realistic cadences:
  *
  *   - LATE_REPLY: responded to the OTHER party's message (a real reply).
- *     Deadline = computeReplyDeadline() — LATE_MSG_THRESHOLD_HOURS (default 3)
- *     hours from the message being replied to, adjusted for quiet hours
+ *     Deadline = computeReplyDeadline() — evaluated in the REP's own local
+ *     time (MessageEvent.selfTimeZone, browser-sourced, same as the app's
+ *     existing userTimeZone pattern), against the quiet-hours window
  *     [LATE_MSG_QUIET_START_HOUR, LATE_MSG_QUIET_END_HOUR) — by default
- *     00:00-07:00 — in the REP's own local time (MessageEvent.selfTimeZone,
- *     browser-sourced, same as the app's existing userTimeZone pattern). A
- *     message that arrives during quiet hours gets its clock started at
- *     quiet-hours-end instead: deadline = quietEnd + threshold. If a
- *     threshold computed from a message OUTSIDE quiet hours would spill into
- *     the next quiet-hours window, LATE_MSG_EDGE_MODE decides:
- *       CAP_AT_QUIET_START (default): deadline is capped at the moment quiet
- *         hours begin (must reply before midnight).
- *       EXTEND_PAST_QUIET: deadline extends to quietEnd + threshold, same as
- *         the "arrived during quiet hours" case.
+ *     00:00-07:00:
+ *       - A message that arrives DURING quiet hours gives the rep the rest
+ *         of that calendar day: deadline = midnight at the start of the
+ *         NEXT local day. Someone messaging at 3am isn't expected to be
+ *         replied to before the workday even starts.
+ *       - A message that arrives OUTSIDE quiet hours gets a flat
+ *         LATE_MSG_THRESHOLD_HOURS (default 3) from when it arrived — no
+ *         special-casing even if that deadline lands inside the quiet
+ *         window (e.g. an 11:59pm message can have a deadline a few minutes
+ *         past midnight; that's fine, it's still "reply within N hours").
  *     Assumes a non-wrapping quiet window (start hour < end hour) — true for
  *     the default 0-7 and any other same-day window; a window that wraps past
  *     midnight on the OTHER end (e.g. 22-6) is not handled.
@@ -67,7 +67,6 @@ import {
 const THRESHOLD_HOURS = LATE_MSG_THRESHOLD_HOURS;
 const QUIET_START_HOUR = LATE_MSG_QUIET_START_HOUR;
 const QUIET_END_HOUR = LATE_MSG_QUIET_END_HOUR;
-const EDGE_MODE = LATE_MSG_EDGE_MODE;
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
@@ -95,6 +94,16 @@ function localHourToUtc(dateStr: string, hour: number, timeZone: string): Date {
   return new Date(convertLocalTimeToUTC(dateStr, `${hh}:00`, timeZone));
 }
 
+// The next calendar date string after `dateStr` (both "YYYY-MM-DD"). Pure
+// calendar-date arithmetic — treating dateStr as a UTC-midnight instant and
+// adding a day is timezone-safe here since we only ever read back the date
+// portion, never the time.
+function nextDateStr(dateStr: string): string {
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
 const isInQuietHours = (hour: number): boolean =>
   hour >= QUIET_START_HOUR && hour < QUIET_END_HOUR;
 
@@ -104,20 +113,15 @@ export function computeReplyDeadline(respondsToAt: Date, timeZone?: string | nul
   const { dateStr, hour } = localDateAndHour(respondsToAt, tz);
 
   if (isInQuietHours(hour)) {
-    const quietEndUtc = localHourToUtc(dateStr, QUIET_END_HOUR, tz);
-    return new Date(quietEndUtc.getTime() + THRESHOLD_HOURS * HOUR_MS);
+    // Quiet-hours message: the rep gets the rest of that calendar day —
+    // deadline is midnight at the START of the next local day.
+    return localHourToUtc(nextDateStr(dateStr), 0, tz);
   }
 
-  const naiveDeadline = new Date(respondsToAt.getTime() + THRESHOLD_HOURS * HOUR_MS);
-  const { dateStr: deadlineDateStr, hour: deadlineHour } = localDateAndHour(naiveDeadline, tz);
-  if (!isInQuietHours(deadlineHour)) return naiveDeadline;
-
-  if (EDGE_MODE === "EXTEND_PAST_QUIET") {
-    const quietEndUtc = localHourToUtc(deadlineDateStr, QUIET_END_HOUR, tz);
-    return new Date(quietEndUtc.getTime() + THRESHOLD_HOURS * HOUR_MS);
-  }
-  // CAP_AT_QUIET_START (default): must reply before quiet hours begin.
-  return localHourToUtc(deadlineDateStr, QUIET_START_HOUR, tz);
+  // Outside quiet hours: flat threshold from the message itself. No
+  // capping/extending even if this lands inside quiet hours — a message
+  // just before midnight is still just "reply within N hours."
+  return new Date(respondsToAt.getTime() + THRESHOLD_HOURS * HOUR_MS);
 }
 
 /**

@@ -97,7 +97,7 @@ export const RECONCILE_MIN_AGE_MINUTES = numEnv(
 );
 
 // Late Messages report thresholds — see lateMessageService.ts for the full
-// reasoning behind quiet hours and the edge-mode toggle.
+// reasoning behind quiet hours.
 export const LATE_MSG_THRESHOLD_HOURS = numEnv(
   "LATE_MSG_THRESHOLD_HOURS",
   3,
@@ -116,10 +116,6 @@ export const LATE_MSG_QUIET_END_HOUR = numEnv(
   0,
   23,
 );
-export const LATE_MSG_EDGE_MODE: "CAP_AT_QUIET_START" | "EXTEND_PAST_QUIET" =
-  process.env.LATE_MSG_EDGE_MODE === "EXTEND_PAST_QUIET"
-    ? "EXTEND_PAST_QUIET"
-    : "CAP_AT_QUIET_START";
 export const LATE_FOLLOWUP_THRESHOLD_DAYS = numEnv(
   "LATE_FOLLOWUP_THRESHOLD_DAYS",
   7,
