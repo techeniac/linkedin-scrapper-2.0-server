@@ -119,18 +119,29 @@ const CO_TTL_MS = 30 * 60 * 1000;
 let coCache: { at: number; options: FilterOption[] } | null = null;
 let coInFlight: Promise<FilterOption[]> | null = null;
 
+// Throws (does not swallow) on failure — matches loadLinkedinAccounts above:
+// a failed load must never get written into coCache as a false "there are no
+// sources" answer, so the next request retries instead of the filter staying
+// empty for a full CO_TTL_MS. Tries every connected owner in turn (not just
+// the first) since this is a single portal-wide property definition — any
+// one owner's valid token is enough, so one owner's revoked token shouldn't
+// fail the whole lookup while others are still connected.
 const loadConnectedOnSources = async (ownerIds: string[]): Promise<FilterOption[]> => {
   if (!ownerIds.length) return [];
-  try {
-    const token = await HubSpotOAuthService.getValidAccessToken(ownerIds[0]);
-    const service = new HubSpotContactService("https://api.hubapi.com", {
-      Authorization: `Bearer ${token}`,
-    });
-    const { connectedOnSources } = await service.getPropertyOptions();
-    return connectedOnSources;
-  } catch {
-    return []; // one owner's token trouble shouldn't break the whole filters response
+  let lastErr: unknown;
+  for (const ownerId of ownerIds) {
+    try {
+      const token = await HubSpotOAuthService.getValidAccessToken(ownerId);
+      const service = new HubSpotContactService("https://api.hubapi.com", {
+        Authorization: `Bearer ${token}`,
+      });
+      const { connectedOnSources } = await service.getPropertyOptions();
+      return connectedOnSources;
+    } catch (err) {
+      lastErr = err;
+    }
   }
+  throw lastErr;
 };
 
 const refreshConnectedOnSources = (ownerIds: string[]): Promise<FilterOption[]> => {
@@ -230,7 +241,12 @@ export const getFilters = async (
     const owners = await getConnectedOwners();
     const ownerIds = owners.map((o) => o.id);
     const { accounts: linkedinAccounts, pairs: ownerAccounts } = await getLinkedinAccountsData(ownerIds);
-    const connectedOnSources = await getConnectedOnSources(ownerIds);
+    // A cold-start failure here must degrade to an empty list for THIS
+    // response only — not throw and 500 the whole /public/filters endpoint
+    // (which every report's toolbar depends on), and not get cached as a
+    // false "there are no sources" answer (loadConnectedOnSources already
+    // guarantees a failure never reaches coCache; see its own comment).
+    const connectedOnSources = await getConnectedOnSources(ownerIds).catch(() => []);
     successResponse(
       res,
       { users: owners, linkedinAccounts, ownerAccounts, connectedOnSources },
