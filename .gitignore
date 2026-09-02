@@ -6,4 +6,4 @@ logs/
 coverage/
 dist/
 build/
-.vscode
+.vscode.worktrees/
