@@ -39,6 +39,28 @@ function todayKey(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+// list()'s full matching-contact set for a given owner scope, cached briefly.
+// Without this, every single page turn on the report's table re-fetched the
+// ENTIRE set from HubSpot from scratch (up to 5 sequential 200-row calls per
+// owner) — slow, and worse, any owner that transiently rate-limited (429) on
+// one page's fetch but not another's caused `total`/`totalPages` to differ
+// between page loads, since each request rebuilt `combined` independently.
+// That's what "pagination isn't working" actually was: not a slicing bug,
+// but a different-length list being sliced on every request. Caching the
+// combined list for a short window makes page 1 -> 2 -> 3 clicks within one
+// browsing session share the same fetch and the same total, matching the
+// stale-while-revalidate pattern already used by contactsCache.ts /
+// hubspotOwnersService.ts elsewhere in this codebase (simplified to a plain
+// TTL here since a live report table only needs "stable within this
+// session", not a background refresh).
+interface ListCacheEntry {
+  at: number;
+  combined: Array<{ id: string; userId: string; name: string; email?: string; company?: string; leadStatus?: string; profileUrl: string }>;
+  partial: boolean;
+}
+const LIST_CACHE_TTL_MS = 90 * 1000;
+const listCache = new Map<string, ListCacheEntry>();
+
 export class ForgottenLeadService {
   /**
    * For every given owner, compute + store today's snapshot IF one doesn't
@@ -109,40 +131,52 @@ export class ForgottenLeadService {
     const page = Math.max(1, params.page || 1);
     const limit = Math.min(100, Math.max(1, params.limit || 10));
 
-    // Fetch each owner's full matching set (capped at 1000/owner, same bound
-    // hubspotContactService.getAllContactsForOwner uses) so multi-owner scope
-    // can be paginated as one combined, stably-ordered list.
-    let partial = false;
-    const perOwner = await Promise.all(
-      params.owners.map(async (owner) => {
-        try {
-          const token = await HubSpotOAuthService.getValidAccessToken(owner.id);
-          const all: Array<ReturnType<typeof mapContact>> = [];
-          let page_ = 1;
-          const pageSize = 200;
-          while (all.length < 1000) {
-            const { contacts, total } = await searchForgottenLeads(token, owner.hubspotOwnerId, page_, pageSize);
-            all.push(...contacts.map((c) => mapContact(c, owner.id)));
-            if (all.length >= total || contacts.length === 0) break;
-            page_++;
+    // Same owner scope -> same cached combined list for LIST_CACHE_TTL_MS, so
+    // paging through the table doesn't re-hit HubSpot (and doesn't risk a
+    // different total) on every click — see the cache's doc comment above.
+    const cacheKey = params.owners.map((o) => o.id).sort().join(",");
+    const cached = listCache.get(cacheKey);
+    let entry: ListCacheEntry;
+    if (cached && Date.now() - cached.at < LIST_CACHE_TTL_MS) {
+      entry = cached;
+    } else {
+      // Fetch each owner's full matching set (capped at 1000/owner, same bound
+      // hubspotContactService.getAllContactsForOwner uses) so multi-owner scope
+      // can be paginated as one combined, stably-ordered list.
+      let partial = false;
+      const perOwner = await Promise.all(
+        params.owners.map(async (owner) => {
+          try {
+            const token = await HubSpotOAuthService.getValidAccessToken(owner.id);
+            const all: Array<ReturnType<typeof mapContact>> = [];
+            let page_ = 1;
+            const pageSize = 200;
+            while (all.length < 1000) {
+              const { contacts, total } = await searchForgottenLeads(token, owner.hubspotOwnerId, page_, pageSize);
+              all.push(...contacts.map((c) => mapContact(c, owner.id)));
+              if (all.length >= total || contacts.length === 0) break;
+              page_++;
+            }
+            return all;
+          } catch (err: any) {
+            logger.warn(`[ForgottenLeads] list failed for owner ${owner.id}: ${err?.message ?? err}`);
+            partial = true;
+            return [];
           }
-          return all;
-        } catch (err: any) {
-          logger.warn(`[ForgottenLeads] list failed for owner ${owner.id}: ${err?.message ?? err}`);
-          partial = true;
-          return [];
-        }
-      }),
-    );
+        }),
+      );
 
-    const combined = perOwner.flat();
-    const total = combined.length;
+      entry = { at: Date.now(), combined: perOwner.flat(), partial };
+      listCache.set(cacheKey, entry);
+    }
+
+    const total = entry.combined.length;
     const start = (page - 1) * limit;
-    const data = combined.slice(start, start + limit);
+    const data = entry.combined.slice(start, start + limit);
 
     return {
       data,
-      metadata: { total, page, limit, totalPages: Math.max(1, Math.ceil(total / limit)), partial },
+      metadata: { total, page, limit, totalPages: Math.max(1, Math.ceil(total / limit)), partial: entry.partial },
     };
   }
 }
