@@ -17,6 +17,7 @@ import {
   HUBSPOT_NEXT_ACTIVITY_PROPERTY,
   HUBSPOT_LAST_ACTIVITY_PROPERTY,
   HUBSPOT_FORGOTTEN_EXCLUDED_LEAD_STATUSES,
+  HUBSPOT_PORTAL_ID,
 } from "../config/env";
 
 const HUBSPOT_BASE = "https://api.hubapi.com";
@@ -107,7 +108,10 @@ export async function searchForgottenLeads(
       email: r.properties?.email || undefined,
       company: r.properties?.company || undefined,
       leadStatus: r.properties?.[HUBSPOT_LEAD_STATUS_PROPERTY] || undefined,
-      profileUrl: `https://app.hubspot.com/contacts/${r.id}`,
+      // Portal ID is required here — without it HubSpot reads `r.id` as the
+      // portal/account id and shows an access-denied page instead of the
+      // contact. See config/env.ts's HUBSPOT_PORTAL_ID comment for where to find it.
+      profileUrl: `https://app.hubspot.com/contacts/${HUBSPOT_PORTAL_ID}/contact/${r.id}`,
     }));
     return { contacts, total: response.data?.total ?? 0 };
   } catch (err: any) {

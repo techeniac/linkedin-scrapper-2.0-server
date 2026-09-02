@@ -28,6 +28,17 @@ function todayUtcMidnight(): Date {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 }
 
+// In-memory only (process lifetime, not persisted) — caps a persistently-failing
+// owner (wrong property name, revoked token) to ONE HubSpot attempt per UTC day
+// per process, instead of retrying on every single dashboard request until
+// someone fixes the underlying problem. Not a substitute for a real alert;
+// just rate-limit-and-latency damage control.
+const failedToday = new Map<string, string>(); // userId -> the UTC day string it last failed on
+
+function todayKey(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
 export class ForgottenLeadService {
   /**
    * For every given owner, compute + store today's snapshot IF one doesn't
@@ -40,6 +51,7 @@ export class ForgottenLeadService {
     await Promise.all(
       owners.map(async (owner) => {
         try {
+          if (failedToday.get(owner.id) === todayKey()) return; // already failed once today; skip silently
           const exists = await ForgottenLeadRepository.hasSnapshotToday(owner.id, today);
           if (exists) return;
           const token = await HubSpotOAuthService.getValidAccessToken(owner.id);
@@ -49,6 +61,7 @@ export class ForgottenLeadService {
           logger.warn(
             `[ForgottenLeads] snapshot failed for owner ${owner.id}: ${err?.message ?? err}`,
           );
+          failedToday.set(owner.id, todayKey());
         }
       }),
     );
@@ -91,7 +104,7 @@ export class ForgottenLeadService {
     owners: OwnerRef[]; // already scoped to the requested/allowed owners
   }): Promise<{
     data: Array<{ id: string; userId: string; name: string; email?: string; company?: string; leadStatus?: string; profileUrl: string }>;
-    metadata: { total: number; page: number; limit: number; totalPages: number };
+    metadata: { total: number; page: number; limit: number; totalPages: number; partial: boolean };
   }> {
     const page = Math.max(1, params.page || 1);
     const limit = Math.min(100, Math.max(1, params.limit || 10));
@@ -99,6 +112,7 @@ export class ForgottenLeadService {
     // Fetch each owner's full matching set (capped at 1000/owner, same bound
     // hubspotContactService.getAllContactsForOwner uses) so multi-owner scope
     // can be paginated as one combined, stably-ordered list.
+    let partial = false;
     const perOwner = await Promise.all(
       params.owners.map(async (owner) => {
         try {
@@ -115,6 +129,7 @@ export class ForgottenLeadService {
           return all;
         } catch (err: any) {
           logger.warn(`[ForgottenLeads] list failed for owner ${owner.id}: ${err?.message ?? err}`);
+          partial = true;
           return [];
         }
       }),
@@ -127,7 +142,7 @@ export class ForgottenLeadService {
 
     return {
       data,
-      metadata: { total, page, limit, totalPages: Math.max(1, Math.ceil(total / limit)) },
+      metadata: { total, page, limit, totalPages: Math.max(1, Math.ceil(total / limit)), partial },
     };
   }
 }

@@ -149,6 +149,14 @@ export const HUBSPOT_FORGOTTEN_EXCLUDED_LEAD_STATUSES = (
   .map((s) => s.trim())
   .filter(Boolean);
 
+// HubSpot portal (a.k.a. Hub ID / Account ID) — required to build a working
+// contact deep link (https://app.hubspot.com/contacts/<PORTAL_ID>/contact/<id>);
+// without it HubSpot reads the contact id as the portal id and shows an
+// access-denied page. Find it under HubSpot Settings -> Account Setup ->
+// Account Defaults, or as the numeric prefix in any app.hubspot.com/.../<portalId>/...
+// URL while logged into the portal. No sensible non-empty default.
+export const HUBSPOT_PORTAL_ID = process.env.HUBSPOT_PORTAL_ID || "";
+
 // CORS configuration - allowed origins for cross-origin requests
 // Note: chrome-extension:// origins are handled separately in app.ts
 export const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS

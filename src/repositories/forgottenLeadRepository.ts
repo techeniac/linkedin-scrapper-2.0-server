@@ -55,14 +55,24 @@ export class ForgottenLeadRepository {
   ): Promise<Array<{ date: string; count: number }>> {
     const bucket = bucketOf(opts.granularity);
     const ownerFilter = ownerFilterSql(opts);
+    // `${bucket}` interpolates to a SEPARATE SQL parameter placeholder each
+    // time it appears in the template, even though the JS value is identical
+    // every time. Postgres's DISTINCT ON requires its leading ORDER BY
+    // expressions to be the SAME parsed expression, and two different
+    // placeholders don't count as the same expression — so `date_trunc`
+    // must be computed exactly ONCE (here, in the `bucketed` CTE) and
+    // referenced by its output column name (`bucket`) everywhere else.
     return prisma.$queryRaw`
-      WITH latest_per_bucket AS (
-        SELECT DISTINCT ON (user_id, date_trunc(${bucket}, snapshot_date))
-          user_id, date_trunc(${bucket}, snapshot_date) AS bucket, count
+      WITH bucketed AS (
+        SELECT user_id, date_trunc(${bucket}, snapshot_date) AS bucket, snapshot_date, count
         FROM forgotten_lead_snapshots
         WHERE snapshot_date >= ${from} AND snapshot_date <= ${to}
           ${ownerFilter}
-        ORDER BY user_id, date_trunc(${bucket}, snapshot_date), snapshot_date DESC
+      ),
+      latest_per_bucket AS (
+        SELECT DISTINCT ON (user_id, bucket) user_id, bucket, count
+        FROM bucketed
+        ORDER BY user_id, bucket, snapshot_date DESC
       )
       SELECT to_char(bucket, 'YYYY-MM-DD') AS date, SUM(count)::int AS count
       FROM latest_per_bucket
@@ -80,15 +90,22 @@ export class ForgottenLeadRepository {
   ): Promise<Array<{ date: string; userId: string; count: number }>> {
     if (!ownerIds.length) return Promise.resolve([]);
     const bucket = bucketOf(opts.granularity);
+    // Same single-interpolation-of-`${bucket}` fix as getSeries above — see
+    // that method's comment for why a repeated `date_trunc(${bucket}, ...)`
+    // breaks DISTINCT ON.
     return prisma.$queryRaw`
-      SELECT DISTINCT ON (user_id, date_trunc(${bucket}, snapshot_date))
-        to_char(date_trunc(${bucket}, snapshot_date), 'YYYY-MM-DD') AS date,
+      WITH bucketed AS (
+        SELECT user_id, date_trunc(${bucket}, snapshot_date) AS bucket, snapshot_date, count
+        FROM forgotten_lead_snapshots
+        WHERE snapshot_date >= ${from} AND snapshot_date <= ${to}
+          AND user_id = ANY(${ownerIds})
+      )
+      SELECT DISTINCT ON (user_id, bucket)
+        to_char(bucket, 'YYYY-MM-DD') AS date,
         user_id AS "userId",
         count
-      FROM forgotten_lead_snapshots
-      WHERE snapshot_date >= ${from} AND snapshot_date <= ${to}
-        AND user_id = ANY(${ownerIds})
-      ORDER BY user_id, date_trunc(${bucket}, snapshot_date), snapshot_date DESC
+      FROM bucketed
+      ORDER BY user_id, bucket, snapshot_date DESC
     `;
   }
 
