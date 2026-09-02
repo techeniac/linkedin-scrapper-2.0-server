@@ -812,7 +812,7 @@ export const getForgottenLeads = async (
       page: toInt(req.query.page, 1),
       limit: toInt(req.query.limit, 10),
       owners: scopedOwners.map((o) => ({ id: o.id, hubspotOwnerId: o.hubspotOwnerId })),
-      connectedOnSource: toStr(req.query.connectedOnSource),
+      connectedOnSources: toStrArray(req.query.connectedOnSources),
     });
 
     const nameMap = await getConnectedOwnerNameMap();
