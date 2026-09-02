@@ -13,6 +13,7 @@ import logger from "../utils/logger";
 export interface ConnectedOwner {
   id: string; // our User.id
   name: string | null; // HubSpot display name (falls back to DB name on failure)
+  hubspotOwnerId: string; // raw HubSpot owner id — needed to scope HubSpot Search API calls
 }
 
 const HUBSPOT_BASE = "https://api.hubapi.com";
@@ -54,7 +55,7 @@ async function loadConnectedOwners(): Promise<ConnectedOwner[]> {
           // keep DB-name fallback
         }
       }
-      return { id: u.id, name };
+      return { id: u.id, name, hubspotOwnerId: u.hubspotOwnerId! };
     }),
   );
 }

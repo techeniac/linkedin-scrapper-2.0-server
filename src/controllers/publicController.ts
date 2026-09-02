@@ -5,6 +5,7 @@ import { ConnectionEventService } from "../services/connectionEventService";
 import { MessageEventService } from "../services/messageEventService";
 import { LateMessageService } from "../services/lateMessageService";
 import { MissedFollowUpService } from "../services/missedFollowUpService";
+import { ForgottenLeadService } from "../services/forgottenLeadService";
 import {
   getConnectedOwners,
   getConnectedOwnerIds,
@@ -205,6 +206,13 @@ export const getSummary = async (
     }
 
     const owners = await getConnectedOwners();
+    // Lazy daily snapshot — see ForgottenLeadService for why this replaces a
+    // cron job. Cheap on every call after the first per owner per UTC day
+    // (a single indexed existence check); only calls HubSpot when a day's
+    // snapshot is genuinely missing.
+    await ForgottenLeadService.ensureTodaySnapshots(
+      owners.map((o) => ({ id: o.id, hubspotOwnerId: o.hubspotOwnerId })),
+    );
     const ownerIds = owners.map((o) => o.id);
     const userId = pickOwner(req.query.userId, ownerIds);
     const linkedinId = toStr(req.query.linkedinId);
@@ -258,6 +266,8 @@ export const getSummary = async (
       messagesSeriesByOwner,
       connectionsActivitySeriesByOwnerAccount,
       messagesSeriesByOwnerAccount,
+      forgottenLeadsSeries,
+      forgottenLeadsSeriesByOwner,
     ] = await Promise.all([
       // COHORT: of requests sent in each bucket, their status now.
       ConnectionService.getSeries(userId, from, to, ownerScope, linkedinId, granularity),
@@ -336,6 +346,12 @@ export const getSummary = async (
         selfLinkedinIds: linkedinIds,
         granularity,
       }),
+      ForgottenLeadService.getSeries(from, to, {
+        userId,
+        restrictUserIds: ownerScope,
+        granularity,
+      }),
+      ForgottenLeadService.getSeriesByOwner(from, to, breakdownOwnerIds, { granularity }),
     ]);
 
     const lateSeries = LateMessageService.buildSeries(lateRows, granularity);
@@ -374,6 +390,7 @@ export const getSummary = async (
     // Pending is a SNAPSHOT, not a time series — "how many are outstanding
     // right now" — so it comes from current state rather than the event log.
     const pendingNow = await ConnectionService.getStats(userId, ownerScope);
+    const forgottenLeadsTotal = await ForgottenLeadService.getTotal(ownerScope);
 
     successResponse(
       res,
@@ -395,6 +412,9 @@ export const getSummary = async (
         missedFollowUpSeriesByOwner,
         missedFollowUpSeriesByOwnerAccount,
         missedFollowUpNow,
+        forgottenLeadsSeries,
+        forgottenLeadsSeriesByOwner,
+        forgottenLeadsTotal,
         users: owners,
         linkedinAccounts,
       },
@@ -710,6 +730,46 @@ export const getMissedFollowUps = async (
     }));
 
     successResponse(res, { data, metadata: result.metadata }, "Missed follow-ups retrieved");
+  } catch (error) {
+    next(error);
+  }
+};
+
+// GET /api/public/forgotten-leads — supporting table for the Forgotten Active
+// Leads report: the actual matching HubSpot contacts, fetched LIVE (not from
+// the snapshot table, which only stores a count) — see ForgottenLeadService.list.
+// No date-range filter (a HubSpot contact's current state has no "occurred at"
+// to window by, unlike the other 3 tables) — just owner scope + pagination.
+export const getForgottenLeads = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const owners = await getConnectedOwners();
+    const ownerIds = owners.map((o) => o.id);
+    const { userId, userIds } = resolveOwnerScope(req, ownerIds);
+    const scopedIds = userId ? [userId] : userIds ?? ownerIds;
+    const scopedOwners = owners.filter((o) => scopedIds.includes(o.id));
+
+    const result = await ForgottenLeadService.list({
+      page: toInt(req.query.page, 1),
+      limit: toInt(req.query.limit, 10),
+      owners: scopedOwners.map((o) => ({ id: o.id, hubspotOwnerId: o.hubspotOwnerId })),
+    });
+
+    const nameMap = await getConnectedOwnerNameMap();
+    const data = result.data.map((r) => ({
+      id: r.id,
+      name: r.name,
+      email: r.email ?? null,
+      company: r.company ?? null,
+      leadStatus: r.leadStatus ?? null,
+      profileUrl: r.profileUrl,
+      user: { name: nameMap.get(r.userId) ?? null },
+    }));
+
+    successResponse(res, { data, metadata: result.metadata }, "Forgotten leads retrieved");
   } catch (error) {
     next(error);
   }
