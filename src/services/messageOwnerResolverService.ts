@@ -16,14 +16,27 @@
 // Contacts are only ever messaged AFTER they're synced to HubSpot (a product
 // invariant, not enforced here), so the "contact not found" case is not
 // expected in practice — the only realistic miss is a synced contact with no
-// HubSpot owner assigned. Both cases, and any HubSpot API failure, are
-// treated identically: attributionSource 'fallback', resolvedOwnerId null,
-// so reports fall back to crediting the scraper for that conversation. Not
-// retried automatically (see design doc's Non-goals) — an unresolved
-// conversation stays 'fallback' until its next NEW message triggers another
-// resolution attempt (a fresh cache miss never happens once a row exists,
-// so in practice this only self-heals if the cache row is manually cleared;
-// accepted for this iteration).
+// HubSpot owner assigned.
+//
+// Two genuinely different situations both currently surface as
+// attributionSource 'fallback' / resolvedOwnerId null on message_events, but
+// only ONE of them is a permanent fact worth caching forever in
+// conversation_owner_cache:
+//   - A synced contact with no HubSpot owner assigned (or no resolvable
+//     LinkedIn handle to look one up with) — this IS permanent; caching it
+//     is correct, and it's what short-circuits future resolveAndPersist
+//     calls for that conversation.
+//   - The resolver FAILING to find out — the scraper isn't HubSpot-connected,
+//     or a HubSpot API call throws (rate limit, network blip) — this is
+//     transient. These are marked with `transient: true` on the returned
+//     ResolvedOwner and are deliberately NOT written to
+//     conversation_owner_cache, so the next resolveAndPersist call for that
+//     conversationKey (a new message, or a re-run of the backfill script)
+//     is a cache MISS and retries the HubSpot lookup instead of being stuck
+//     on 'fallback' forever. message_events rows still get stamped
+//     resolvedOwnerId null / attributionSource 'fallback' in the meantime
+//     (same as the permanent case) so they don't sit in limbo — only the
+//     cache row is withheld.
 import prisma from "../config/prisma";
 import logger from "../utils/logger";
 import { ConversationOwnerCacheRepository } from "../repositories/conversationOwnerCacheRepository";
@@ -36,6 +49,10 @@ export type AttributionSource = "hubspot" | "fallback";
 export interface ResolvedOwner {
   ownerId: string | null;
   source: AttributionSource;
+  // True ONLY when resolution failed to find out (HubSpot-connection or API
+  // failure) rather than genuinely finding no owner — see the file header.
+  // Absent/falsy for every normal result, including a real "no owner" fact.
+  transient?: boolean;
 }
 
 export class MessageOwnerResolverService {
@@ -52,7 +69,14 @@ export class MessageOwnerResolverService {
 
     const resolved = await this.resolveOwnerFromHubSpot(params.conversationKey, params.scraperUserId);
 
-    await ConversationOwnerCacheRepository.upsert(params.conversationKey, resolved.ownerId, resolved.source);
+    // Only cache a genuinely-resolved result (including a real "no owner"
+    // fact) — a transient failure must NOT poison the cache, or it would
+    // short-circuit every future resolution attempt for this conversation
+    // forever (the cache-hit path above never re-queries HubSpot once a row
+    // exists). message_events still gets stamped either way, below.
+    if (!resolved.transient) {
+      await ConversationOwnerCacheRepository.upsert(params.conversationKey, resolved.ownerId, resolved.source);
+    }
     await MessageEventRepository.updateResolvedOwner(params.conversationKey, resolved.ownerId, resolved.source);
   }
 
@@ -60,32 +84,41 @@ export class MessageOwnerResolverService {
     conversationKey: string,
     scraperUserId: string,
   ): Promise<ResolvedOwner> {
+    // MessageEvent only stores participantLinkedinId as LinkedIn's internal
+    // "aco" id (not a usable profile handle) — MessageActivity is the only
+    // place the actual profile URL is stored, keyed by the scraper who
+    // recorded it. A missing/unparseable handle is a genuine, permanent
+    // "can't resolve, and never will from this data" case — NOT part of the
+    // transient-failure handling below, so it's deliberately outside that
+    // try/catch.
+    const activity = await prisma.messageActivity.findUnique({
+      where: { userId_conversationKey: { userId: scraperUserId, conversationKey } },
+      select: { participantProfileUrl: true },
+    });
+    const handle = extractLinkedInHandle(activity?.participantProfileUrl ?? null);
+    if (!handle) return { ownerId: null, source: "fallback" };
+
+    // Only the actual HubSpot round-trip can fail transiently (scraper not
+    // HubSpot-connected, rate limit, network blip) — those failures must NOT
+    // be cached as a permanent "no owner" fact. See file header.
+    let hubspotOwnerId: string | null;
     try {
-      // MessageEvent only stores participantLinkedinId as LinkedIn's internal
-      // "aco" id (not a usable profile handle) — MessageActivity is the only
-      // place the actual profile URL is stored, keyed by the scraper who
-      // recorded it.
-      const activity = await prisma.messageActivity.findUnique({
-        where: { userId_conversationKey: { userId: scraperUserId, conversationKey } },
-        select: { participantProfileUrl: true },
-      });
-      const handle = extractLinkedInHandle(activity?.participantProfileUrl ?? null);
-      if (!handle) return { ownerId: null, source: "fallback" };
-
       const { syncService } = await HubSpotContextService.getContext(scraperUserId);
-      const hubspotOwnerId = await syncService.findContactOwnerIdByProfileUrl(handle);
-      if (!hubspotOwnerId) return { ownerId: null, source: "fallback" };
-
-      const user = await prisma.user.findFirst({
-        where: { hubspotOwnerId },
-        select: { id: true },
-      });
-      if (!user) return { ownerId: null, source: "fallback" };
-
-      return { ownerId: user.id, source: "hubspot" };
+      hubspotOwnerId = await syncService.findContactOwnerIdByProfileUrl(handle);
     } catch (err: any) {
-      logger.warn(`[MessageOwnerResolver] resolution failed for conversation ${conversationKey}: ${err?.message}`);
-      return { ownerId: null, source: "fallback" };
+      logger.warn(
+        `[MessageOwnerResolver] transient resolution failure for conversation ${conversationKey}: ${err?.message}`,
+      );
+      return { ownerId: null, source: "fallback", transient: true };
     }
+    if (!hubspotOwnerId) return { ownerId: null, source: "fallback" };
+
+    const user = await prisma.user.findFirst({
+      where: { hubspotOwnerId },
+      select: { id: true },
+    });
+    if (!user) return { ownerId: null, source: "fallback" };
+
+    return { ownerId: user.id, source: "hubspot" };
   }
 }

@@ -29,17 +29,37 @@ type SeriesFilterOpts = {
   restrictUserIds?: string[];
   selfLinkedinId?: string;
   selfLinkedinIds?: string[];
+  // Opt-out of the effective-owner (COALESCE(resolved_owner_id, user_id))
+  // filtering every report endpoint wants, in favor of the raw scraper
+  // user_id. Exists ONLY for GET /api/messages/stats/today (the extension
+  // popup's own daily counter) — that endpoint means "what did I, this
+  // browser session, do today," which must NOT shift as HubSpot resolution
+  // completes asynchronously (it can even flip AWAY from the caller mid-day).
+  // Every report call site should leave this unset/false and get the
+  // COALESCE behavior.
+  useRawScraperId?: boolean;
 };
 
 const bucketOf = (granularity?: "day" | "week" | "month") =>
   granularity === "week" ? "week" : granularity === "month" ? "month" : "day";
 
-const ownerFilterSql = (opts: Pick<SeriesFilterOpts, "userId" | "restrictUserIds">) =>
-  opts.userId
-    ? Prisma.sql`AND COALESCE(resolved_owner_id, user_id) = ${opts.userId}`
+// Shared owner-filter fragment for getSeries/getTotals/findQualifyingEvents.
+// Defaults to filtering on the EFFECTIVE owner — COALESCE(resolved_owner_id,
+// user_id) — since that's what every report endpoint (Messages, Late
+// Responses, Follow-up Tracking) wants: credit the resolved HubSpot owner,
+// falling back to the scraper only when resolution hasn't happened/succeeded.
+// Pass useRawScraperId: true to filter on the plain user_id instead — the
+// one legitimate case is the extension popup's own "what did I do today"
+// counter (see SeriesFilterOpts.useRawScraperId above), which must reflect
+// the calling scraper's own activity, not who it ended up credited to.
+const ownerFilterSql = (opts: Pick<SeriesFilterOpts, "userId" | "restrictUserIds" | "useRawScraperId">) => {
+  const column = opts.useRawScraperId ? Prisma.sql`user_id` : Prisma.sql`COALESCE(resolved_owner_id, user_id)`;
+  return opts.userId
+    ? Prisma.sql`AND ${column} = ${opts.userId}`
     : opts.restrictUserIds
-      ? Prisma.sql`AND COALESCE(resolved_owner_id, user_id) = ANY(${opts.restrictUserIds})`
+      ? Prisma.sql`AND ${column} = ANY(${opts.restrictUserIds})`
       : Prisma.empty;
+};
 
 const accountFilterSql = (opts: Pick<SeriesFilterOpts, "selfLinkedinId" | "selfLinkedinIds">) =>
   opts.selfLinkedinIds?.length

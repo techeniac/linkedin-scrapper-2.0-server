@@ -106,7 +106,7 @@ export const getMessageStatsToday = async (
     const now = new Date();
     const to = toDate(req.query.to) ?? now;
     const from = toDate(req.query.from) ?? new Date(to.getTime() - 24 * 60 * 60 * 1000);
-    const stats = await MessageEventService.getTotals(from, to, { userId });
+    const stats = await MessageEventService.getTotals(from, to, { userId, useRawScraperId: true });
     successResponse(res, stats, "Today's message stats retrieved");
   } catch (error: any) {
     next(error);

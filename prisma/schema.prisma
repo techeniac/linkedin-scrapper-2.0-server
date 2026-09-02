@@ -290,8 +290,18 @@ model MessageEvent {
   @@index([userId, occurredAt])
   @@index([type, occurredAt])
   @@index([userId, type, occurredAt])
-  // Powers the Missed Follow-Up report's "last event per conversation" query
-  // (DISTINCT ON (user_id, conversation_key) ... ORDER BY occurred_at DESC).
+  // NOTE: this plain user_id-prefixed index does NOT support the Missed
+  // Follow-Up report's "last event per conversation" query — that query
+  // groups/orders by the EFFECTIVE owner, COALESCE(resolved_owner_id,
+  // user_id), not raw user_id (see MissedFollowUpRepository.
+  // findLastEventPerConversation). The expression indexes that actually
+  // support it —
+  //   message_events_effective_owner_occurred_at_idx
+  //   message_events_effective_owner_conv_occurred_at_idx
+  // — are hand-authored SQL (prisma/migrations/20260902000000_add_message_
+  // event_effective_owner_indexes) since Prisma's schema DSL can't express
+  // expression indexes; they won't appear here as an @@index. This
+  // user_id-prefixed index is kept for other userId-scoped lookups.
   @@index([userId, conversationKey, occurredAt])
   // Powers the resolved-late deadline-crossing query, filtered by respondsToAt
   // (not occurredAt — a resolution can be arbitrarily far after its trigger,

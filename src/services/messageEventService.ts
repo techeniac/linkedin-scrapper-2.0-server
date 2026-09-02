@@ -235,7 +235,14 @@ export class MessageEventService {
     return MessageEventRepository.getSeriesByOwnerAccount(from, to, ownerIds, opts);
   }
 
-  /** Totals over the event history for a window (no bucketing). */
+  /**
+   * Totals over the event history for a window (no bucketing).
+   *
+   * `useRawScraperId` opts out of the effective-owner (resolved HubSpot
+   * owner) filtering every report caller wants, filtering on the raw scraper
+   * user_id instead — see MessageEventRepository's SeriesFilterOpts for why
+   * this exists (only the extension popup's own daily counter needs it).
+   */
   static getTotals(
     from: Date,
     to: Date,
@@ -244,6 +251,7 @@ export class MessageEventService {
       restrictUserIds?: string[];
       selfLinkedinId?: string;
       selfLinkedinIds?: string[];
+      useRawScraperId?: boolean;
     } = {},
   ): Promise<{
     fresh: number;
