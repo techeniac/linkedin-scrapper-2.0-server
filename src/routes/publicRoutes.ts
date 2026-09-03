@@ -6,6 +6,7 @@ import {
   getMessages,
   getLateMessages,
   getMissedFollowUps,
+  getForgottenLeads,
 } from "../controllers/publicController";
 import { requirePublicApiKey } from "../middlewares/publicApiKey";
 import { authenticate } from "../middlewares/auth";
@@ -26,5 +27,6 @@ router.get("/connections", getConnections);
 router.get("/messages", getMessages);
 router.get("/late-messages", getLateMessages);
 router.get("/missed-followups", getMissedFollowUps);
+router.get("/forgotten-leads", getForgottenLeads);
 
 export default router;

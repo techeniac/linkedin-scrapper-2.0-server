@@ -27,6 +27,7 @@ model User {
   connectionEvents   ConnectionRequestEvent[]
   messageActivity    MessageActivity[]
   messageEvents      MessageEvent[]
+  forgottenLeadSnapshots ForgottenLeadSnapshot[]
 
   @@map("users")
 }
@@ -281,6 +282,38 @@ model MessageEvent {
   // this flag), so type isn't needed in the index.
   @@index([userId, isFollowUp, respondsToAt])
   @@map("message_events")
+}
+
+// Daily snapshot of "forgotten active leads" — active HubSpot contacts (not
+// Not Interested / not DND-Suspended) with no task or activity EVER recorded
+// (both Next Activity Date and Last Activity Date unknown). HubSpot Contact
+// state is never mirrored locally elsewhere in this codebase (see
+// hubspotContactService.ts — contacts are always fetched live), so unlike
+// ConnectionRequestEvent/MessageEvent this is NOT an append-only fact log —
+// it is a snapshot of a live HubSpot query result, taken at most once per
+// (user, UTC calendar day). Written lazily: the first /api/public/summary
+// request of the day for a given owner computes and stores it; every later
+// request that day reads the stored row instead of re-querying HubSpot. This
+// is what stands in for a cron job on a free-tier Vercel deployment that
+// cannot schedule sub-daily (or, depending on plan, any) cron runs.
+//
+// NOT additive across days like MessageEvent/ConnectionRequestEvent — a
+// backlog count is a gauge, not an event count. See ForgottenLeadService for
+// how this is reflected in getSeries (last-value-per-bucket, never summed
+// across days) and getTotals (latest row only).
+model ForgottenLeadSnapshot {
+  id           String   @id @default(uuid())
+  userId       String   @map("user_id")
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Truncated to UTC midnight — the calendar day this snapshot represents,
+  // not the instant it was computed (see createdAt for that).
+  snapshotDate DateTime @map("snapshot_date")
+  count        Int
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@unique([userId, snapshotDate])
+  @@index([snapshotDate])
+  @@map("forgotten_lead_snapshots")
 }
 
 // Hashed, rotating refresh tokens for user sessions (7-day TTL).

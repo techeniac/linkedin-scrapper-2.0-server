@@ -129,6 +129,34 @@ export const HUBSPOT_CLIENT_SECRET = process.env.HUBSPOT_CLIENT_SECRET || "";
 export const HUBSPOT_REDIRECT_URI = process.env.HUBSPOT_REDIRECT_URI || "";
 export const HUBSPOT_SCOPES = process.env.HUBSPOT_SCOPES || "";
 
+// Forgotten Active Leads report: which HubSpot contact properties carry lead
+// status / next-activity-date / last-activity-date, and which lead-status
+// values count as "not active" (excluded from the report). Configurable
+// because these are per-portal property internal names, not HubSpot API
+// constants — verified once via scripts/inspectForgottenLeadProperties.ts,
+// then set here so a wrong guess or a future portal property rename is an
+// env var change, not a redeploy of hubspotLeadSearchService.ts's logic.
+export const HUBSPOT_LEAD_STATUS_PROPERTY =
+  process.env.HUBSPOT_LEAD_STATUS_PROPERTY || "hs_lead_status";
+export const HUBSPOT_NEXT_ACTIVITY_PROPERTY =
+  process.env.HUBSPOT_NEXT_ACTIVITY_PROPERTY || "notes_next_activity_date";
+export const HUBSPOT_LAST_ACTIVITY_PROPERTY =
+  process.env.HUBSPOT_LAST_ACTIVITY_PROPERTY || "notes_last_activity_date";
+export const HUBSPOT_FORGOTTEN_EXCLUDED_LEAD_STATUSES = (
+  process.env.HUBSPOT_FORGOTTEN_EXCLUDED_LEAD_STATUSES || "NOT_INTERESTED,DND_SUSPENDED"
+)
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+// HubSpot portal (a.k.a. Hub ID / Account ID) — required to build a working
+// contact deep link (https://app.hubspot.com/contacts/<PORTAL_ID>/contact/<id>);
+// without it HubSpot reads the contact id as the portal id and shows an
+// access-denied page. Find it under HubSpot Settings -> Account Setup ->
+// Account Defaults, or as the numeric prefix in any app.hubspot.com/.../<portalId>/...
+// URL while logged into the portal. No sensible non-empty default.
+export const HUBSPOT_PORTAL_ID = process.env.HUBSPOT_PORTAL_ID || "";
+
 // CORS configuration - allowed origins for cross-origin requests
 // Note: chrome-extension:// origins are handled separately in app.ts
 export const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS

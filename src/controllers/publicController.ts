@@ -5,6 +5,9 @@ import { ConnectionEventService } from "../services/connectionEventService";
 import { MessageEventService } from "../services/messageEventService";
 import { LateMessageService } from "../services/lateMessageService";
 import { MissedFollowUpService } from "../services/missedFollowUpService";
+import { ForgottenLeadService } from "../services/forgottenLeadService";
+import { HubSpotContactService } from "../services/hubspotContactService";
+import { HubSpotOAuthService } from "../services/hubspotOAuthService";
 import {
   getConnectedOwners,
   getConnectedOwnerIds,
@@ -102,6 +105,67 @@ const getLinkedinAccountsData = async (
 const getLinkedinAccounts = async (ownerIds: string[]): Promise<LinkedinAccount[]> =>
   (await getLinkedinAccountsData(ownerIds)).accounts;
 
+// "Connected On" option list for the Forgotten Active Leads report's filter —
+// HubSpot's `contact_source` property (which rep's LinkedIn profile sourced
+// a contact; already surfaced elsewhere in this codebase under the same
+// "connectedOnSource" name — see hubspotContactService.ts's
+// getPropertyOptions/findContactByProfileUrl). Portal-specific and mutable
+// (a new rep = a new option), so fetched from HubSpot rather than hardcoded,
+// same stale-while-revalidate cache shape as the LinkedIn-accounts cache
+// above — any one connected owner's token is enough, since this is a
+// portal-wide property definition, not per-owner data.
+type FilterOption = { value: string; label: string };
+const CO_TTL_MS = 30 * 60 * 1000;
+let coCache: { at: number; options: FilterOption[] } | null = null;
+let coInFlight: Promise<FilterOption[]> | null = null;
+
+// Throws (does not swallow) on failure — matches loadLinkedinAccounts above:
+// a failed load must never get written into coCache as a false "there are no
+// sources" answer, so the next request retries instead of the filter staying
+// empty for a full CO_TTL_MS. Tries every connected owner in turn (not just
+// the first) since this is a single portal-wide property definition — any
+// one owner's valid token is enough, so one owner's revoked token shouldn't
+// fail the whole lookup while others are still connected.
+const loadConnectedOnSources = async (ownerIds: string[]): Promise<FilterOption[]> => {
+  if (!ownerIds.length) return [];
+  let lastErr: unknown;
+  for (const ownerId of ownerIds) {
+    try {
+      const token = await HubSpotOAuthService.getValidAccessToken(ownerId);
+      const service = new HubSpotContactService("https://api.hubapi.com", {
+        Authorization: `Bearer ${token}`,
+      });
+      const { connectedOnSources } = await service.getPropertyOptions();
+      return connectedOnSources;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr;
+};
+
+const refreshConnectedOnSources = (ownerIds: string[]): Promise<FilterOption[]> => {
+  if (!coInFlight) {
+    coInFlight = loadConnectedOnSources(ownerIds)
+      .then((options) => {
+        coCache = { at: Date.now(), options };
+        return options;
+      })
+      .finally(() => {
+        coInFlight = null;
+      });
+  }
+  return coInFlight;
+};
+
+const getConnectedOnSources = async (ownerIds: string[]): Promise<FilterOption[]> => {
+  if (!coCache) return refreshConnectedOnSources(ownerIds); // cold — block once
+  if (Date.now() - coCache.at >= CO_TTL_MS) {
+    void refreshConnectedOnSources(ownerIds).catch(() => {}); // stale — refresh in bg
+  }
+  return coCache.options; // warm — instant
+};
+
 // These endpoints are intentionally UNAUTHENTICATED (see publicRoutes.ts): they
 // serve read-only reporting data to the Chitragupt frontend (no login yet).
 // Scope is limited to HubSpot-CONNECTED owners only, and owner names come from
@@ -175,10 +239,19 @@ export const getFilters = async (
 ): Promise<void> => {
   try {
     const owners = await getConnectedOwners();
-    const { accounts: linkedinAccounts, pairs: ownerAccounts } = await getLinkedinAccountsData(
-      owners.map((o) => o.id),
+    const ownerIds = owners.map((o) => o.id);
+    const { accounts: linkedinAccounts, pairs: ownerAccounts } = await getLinkedinAccountsData(ownerIds);
+    // A cold-start failure here must degrade to an empty list for THIS
+    // response only — not throw and 500 the whole /public/filters endpoint
+    // (which every report's toolbar depends on), and not get cached as a
+    // false "there are no sources" answer (loadConnectedOnSources already
+    // guarantees a failure never reaches coCache; see its own comment).
+    const connectedOnSources = await getConnectedOnSources(ownerIds).catch(() => []);
+    successResponse(
+      res,
+      { users: owners, linkedinAccounts, ownerAccounts, connectedOnSources },
+      "Filters retrieved",
     );
-    successResponse(res, { users: owners, linkedinAccounts, ownerAccounts }, "Filters retrieved");
   } catch (error) {
     next(error);
   }
@@ -205,6 +278,13 @@ export const getSummary = async (
     }
 
     const owners = await getConnectedOwners();
+    // Lazy daily snapshot — see ForgottenLeadService for why this replaces a
+    // cron job. Cheap on every call after the first per owner per UTC day
+    // (a single indexed existence check); only calls HubSpot when a day's
+    // snapshot is genuinely missing.
+    await ForgottenLeadService.ensureTodaySnapshots(
+      owners.map((o) => ({ id: o.id, hubspotOwnerId: o.hubspotOwnerId })),
+    );
     const ownerIds = owners.map((o) => o.id);
     const userId = pickOwner(req.query.userId, ownerIds);
     const linkedinId = toStr(req.query.linkedinId);
@@ -258,6 +338,8 @@ export const getSummary = async (
       messagesSeriesByOwner,
       connectionsActivitySeriesByOwnerAccount,
       messagesSeriesByOwnerAccount,
+      forgottenLeadsSeries,
+      forgottenLeadsSeriesByOwner,
     ] = await Promise.all([
       // COHORT: of requests sent in each bucket, their status now.
       ConnectionService.getSeries(userId, from, to, ownerScope, linkedinId, granularity),
@@ -336,6 +418,12 @@ export const getSummary = async (
         selfLinkedinIds: linkedinIds,
         granularity,
       }),
+      ForgottenLeadService.getSeries(from, to, {
+        userId,
+        restrictUserIds: ownerScope,
+        granularity,
+      }),
+      ForgottenLeadService.getSeriesByOwner(from, to, breakdownOwnerIds, { granularity }),
     ]);
 
     const lateSeries = LateMessageService.buildSeries(lateRows, granularity);
@@ -374,6 +462,7 @@ export const getSummary = async (
     // Pending is a SNAPSHOT, not a time series — "how many are outstanding
     // right now" — so it comes from current state rather than the event log.
     const pendingNow = await ConnectionService.getStats(userId, ownerScope);
+    const forgottenLeadsTotal = await ForgottenLeadService.getTotal(ownerScope);
 
     successResponse(
       res,
@@ -395,6 +484,9 @@ export const getSummary = async (
         missedFollowUpSeriesByOwner,
         missedFollowUpSeriesByOwnerAccount,
         missedFollowUpNow,
+        forgottenLeadsSeries,
+        forgottenLeadsSeriesByOwner,
+        forgottenLeadsTotal,
         users: owners,
         linkedinAccounts,
       },
@@ -710,6 +802,47 @@ export const getMissedFollowUps = async (
     }));
 
     successResponse(res, { data, metadata: result.metadata }, "Missed follow-ups retrieved");
+  } catch (error) {
+    next(error);
+  }
+};
+
+// GET /api/public/forgotten-leads — supporting table for the Forgotten Active
+// Leads report: the actual matching HubSpot contacts, fetched LIVE (not from
+// the snapshot table, which only stores a count) — see ForgottenLeadService.list.
+// No date-range filter (a HubSpot contact's current state has no "occurred at"
+// to window by, unlike the other 3 tables) — just owner scope + pagination.
+export const getForgottenLeads = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const owners = await getConnectedOwners();
+    const ownerIds = owners.map((o) => o.id);
+    const { userId, userIds } = resolveOwnerScope(req, ownerIds);
+    const scopedIds = userId ? [userId] : userIds ?? ownerIds;
+    const scopedOwners = owners.filter((o) => scopedIds.includes(o.id));
+
+    const result = await ForgottenLeadService.list({
+      page: toInt(req.query.page, 1),
+      limit: toInt(req.query.limit, 10),
+      owners: scopedOwners.map((o) => ({ id: o.id, hubspotOwnerId: o.hubspotOwnerId })),
+      connectedOnSources: toStrArray(req.query.connectedOnSources),
+    });
+
+    const nameMap = await getConnectedOwnerNameMap();
+    const data = result.data.map((r) => ({
+      id: r.id,
+      name: r.name,
+      email: r.email ?? null,
+      company: r.company ?? null,
+      leadStatus: r.leadStatus ?? null,
+      profileUrl: r.profileUrl,
+      user: { name: nameMap.get(r.userId) ?? null },
+    }));
+
+    successResponse(res, { data, metadata: result.metadata }, "Forgotten leads retrieved");
   } catch (error) {
     next(error);
   }
