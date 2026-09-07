@@ -7,6 +7,8 @@ import {
   getLateMessages,
   getMissedFollowUps,
   getForgottenLeads,
+  getNextStepGap,
+  getScheduledNoTouch,
 } from "../controllers/publicController";
 import { requirePublicApiKey } from "../middlewares/publicApiKey";
 import { authenticate } from "../middlewares/auth";
@@ -28,5 +30,7 @@ router.get("/messages", getMessages);
 router.get("/late-messages", getLateMessages);
 router.get("/missed-followups", getMissedFollowUps);
 router.get("/forgotten-leads", getForgottenLeads);
+router.get("/next-step-gap", getNextStepGap);
+router.get("/scheduled-no-touch", getScheduledNoTouch);
 
 export default router;
