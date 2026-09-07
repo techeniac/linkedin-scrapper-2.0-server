@@ -6,6 +6,8 @@ import { MessageEventService } from "../services/messageEventService";
 import { LateMessageService } from "../services/lateMessageService";
 import { MissedFollowUpService } from "../services/missedFollowUpService";
 import { ForgottenLeadService } from "../services/forgottenLeadService";
+import { NextStepGapService } from "../services/nextStepGapService";
+import { ScheduledNoTouchService } from "../services/scheduledNoTouchService";
 import { HubSpotContactService } from "../services/hubspotContactService";
 import { HubSpotOAuthService } from "../services/hubspotOAuthService";
 import {
@@ -282,9 +284,17 @@ export const getSummary = async (
     // cron job. Cheap on every call after the first per owner per UTC day
     // (a single indexed existence check); only calls HubSpot when a day's
     // snapshot is genuinely missing.
-    await ForgottenLeadService.ensureTodaySnapshots(
-      owners.map((o) => ({ id: o.id, hubspotOwnerId: o.hubspotOwnerId })),
-    );
+    await Promise.all([
+      ForgottenLeadService.ensureTodaySnapshots(
+        owners.map((o) => ({ id: o.id, hubspotOwnerId: o.hubspotOwnerId })),
+      ),
+      NextStepGapService.ensureTodaySnapshots(
+        owners.map((o) => ({ id: o.id, hubspotOwnerId: o.hubspotOwnerId })),
+      ),
+      ScheduledNoTouchService.ensureTodaySnapshots(
+        owners.map((o) => ({ id: o.id, hubspotOwnerId: o.hubspotOwnerId })),
+      ),
+    ]);
     const ownerIds = owners.map((o) => o.id);
     const userId = pickOwner(req.query.userId, ownerIds);
     const linkedinId = toStr(req.query.linkedinId);
@@ -340,6 +350,10 @@ export const getSummary = async (
       messagesSeriesByOwnerAccount,
       forgottenLeadsSeries,
       forgottenLeadsSeriesByOwner,
+      nextStepGapSeries,
+      nextStepGapSeriesByOwner,
+      scheduledNoTouchSeries,
+      scheduledNoTouchSeriesByOwner,
     ] = await Promise.all([
       // COHORT: of requests sent in each bucket, their status now.
       ConnectionService.getSeries(userId, from, to, ownerScope, linkedinId, granularity),
@@ -424,6 +438,18 @@ export const getSummary = async (
         granularity,
       }),
       ForgottenLeadService.getSeriesByOwner(from, to, breakdownOwnerIds, { granularity }),
+      NextStepGapService.getSeries(from, to, {
+        userId,
+        restrictUserIds: ownerScope,
+        granularity,
+      }),
+      NextStepGapService.getSeriesByOwner(from, to, breakdownOwnerIds, { granularity }),
+      ScheduledNoTouchService.getSeries(from, to, {
+        userId,
+        restrictUserIds: ownerScope,
+        granularity,
+      }),
+      ScheduledNoTouchService.getSeriesByOwner(from, to, breakdownOwnerIds, { granularity }),
     ]);
 
     const lateSeries = LateMessageService.buildSeries(lateRows, granularity);
@@ -461,8 +487,14 @@ export const getSummary = async (
 
     // Pending is a SNAPSHOT, not a time series — "how many are outstanding
     // right now" — so it comes from current state rather than the event log.
-    const pendingNow = await ConnectionService.getStats(userId, ownerScope);
-    const forgottenLeadsTotal = await ForgottenLeadService.getTotal(ownerScope);
+    // Independent reads, so run them together instead of paying 4 sequential
+    // round trips on every dashboard load.
+    const [pendingNow, forgottenLeadsTotal, nextStepGapTotals, scheduledNoTouchTotal] = await Promise.all([
+      ConnectionService.getStats(userId, ownerScope),
+      ForgottenLeadService.getTotal(ownerScope),
+      NextStepGapService.getTotals(ownerScope),
+      ScheduledNoTouchService.getTotal(ownerScope),
+    ]);
 
     successResponse(
       res,
@@ -487,6 +519,12 @@ export const getSummary = async (
         forgottenLeadsSeries,
         forgottenLeadsSeriesByOwner,
         forgottenLeadsTotal,
+        nextStepGapSeries,
+        nextStepGapSeriesByOwner,
+        nextStepGapTotals,
+        scheduledNoTouchSeries,
+        scheduledNoTouchSeriesByOwner,
+        scheduledNoTouchTotal,
         users: owners,
         linkedinAccounts,
       },
@@ -843,6 +881,91 @@ export const getForgottenLeads = async (
     }));
 
     successResponse(res, { data, metadata: result.metadata }, "Forgotten leads retrieved");
+  } catch (error) {
+    next(error);
+  }
+};
+
+// GET /api/public/next-step-gap — supporting table for the "No Next Step
+// Scheduled" report: the actual matching HubSpot contacts, fetched LIVE (not
+// from the snapshot table, which only stores counts) — see
+// NextStepGapService.list. No date-range filter, same reasoning as
+// getForgottenLeads above — just owner scope + pagination.
+export const getNextStepGap = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const owners = await getConnectedOwners();
+    const ownerIds = owners.map((o) => o.id);
+    const { userId, userIds } = resolveOwnerScope(req, ownerIds);
+    const scopedIds = userId ? [userId] : userIds ?? ownerIds;
+    const scopedOwners = owners.filter((o) => scopedIds.includes(o.id));
+
+    const result = await NextStepGapService.list({
+      page: toInt(req.query.page, 1),
+      limit: toInt(req.query.limit, 10),
+      owners: scopedOwners.map((o) => ({ id: o.id, hubspotOwnerId: o.hubspotOwnerId })),
+      connectedOnSources: toStrArray(req.query.connectedOnSources),
+    });
+
+    const nameMap = await getConnectedOwnerNameMap();
+    const data = result.data.map((r) => ({
+      id: r.id,
+      name: r.name,
+      email: r.email ?? null,
+      company: r.company ?? null,
+      leadStatus: r.leadStatus ?? null,
+      profileUrl: r.profileUrl,
+      segment: r.segment,
+      staleSince: r.staleSince,
+      staleDays: r.staleDays,
+      user: { name: nameMap.get(r.userId) ?? null },
+    }));
+
+    successResponse(res, { data, metadata: result.metadata }, "Next step gap leads retrieved");
+  } catch (error) {
+    next(error);
+  }
+};
+
+// GET /api/public/scheduled-no-touch — supporting table for the "Scheduled,
+// Never Touched" report: the actual matching HubSpot contacts, fetched LIVE
+// — see ScheduledNoTouchService.list. No date-range filter, same reasoning
+// as getForgottenLeads/getNextStepGap above — just owner scope + pagination.
+export const getScheduledNoTouch = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const owners = await getConnectedOwners();
+    const ownerIds = owners.map((o) => o.id);
+    const { userId, userIds } = resolveOwnerScope(req, ownerIds);
+    const scopedIds = userId ? [userId] : userIds ?? ownerIds;
+    const scopedOwners = owners.filter((o) => scopedIds.includes(o.id));
+
+    const result = await ScheduledNoTouchService.list({
+      page: toInt(req.query.page, 1),
+      limit: toInt(req.query.limit, 10),
+      owners: scopedOwners.map((o) => ({ id: o.id, hubspotOwnerId: o.hubspotOwnerId })),
+      connectedOnSources: toStrArray(req.query.connectedOnSources),
+    });
+
+    const nameMap = await getConnectedOwnerNameMap();
+    const data = result.data.map((r) => ({
+      id: r.id,
+      name: r.name,
+      email: r.email ?? null,
+      company: r.company ?? null,
+      leadStatus: r.leadStatus ?? null,
+      profileUrl: r.profileUrl,
+      nextActivityDate: r.nextActivityDate,
+      user: { name: nameMap.get(r.userId) ?? null },
+    }));
+
+    successResponse(res, { data, metadata: result.metadata }, "Scheduled no-touch leads retrieved");
   } catch (error) {
     next(error);
   }

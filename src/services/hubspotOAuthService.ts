@@ -1,5 +1,5 @@
-import axios from "axios";
 import crypto from "crypto";
+import { hubspotRequest } from "../utils/hubspotRequest";
 import { UserRepository } from "../repositories/userRepository";
 import prisma from "../config/prisma";
 import logger from "../utils/logger";
@@ -68,17 +68,18 @@ export class HubSpotOAuthService {
   // Exchange authorization code for access and refresh tokens
   static async exchangeCodeForTokens(code: string) {
     try {
-      const response = await axios.post(
-        "https://api.hubapi.com/oauth/v1/token",
-        new URLSearchParams({
+      const response = await hubspotRequest({
+        method: "post",
+        url: "https://api.hubapi.com/oauth/v1/token",
+        data: new URLSearchParams({
           grant_type: "authorization_code",
           client_id: HUBSPOT_CLIENT_ID,
           client_secret: HUBSPOT_CLIENT_SECRET,
           redirect_uri: HUBSPOT_REDIRECT_URI,
           code,
         }),
-        { headers: { "Content-Type": "application/x-www-form-urlencoded" } },
-      );
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      });
       return {
         accessToken: response.data.access_token,
         refreshToken: response.data.refresh_token,
@@ -93,16 +94,17 @@ export class HubSpotOAuthService {
   // Refresh expired access token using refresh token
   static async refreshAccessToken(refreshToken: string) {
     try {
-      const response = await axios.post(
-        "https://api.hubapi.com/oauth/v1/token",
-        new URLSearchParams({
+      const response = await hubspotRequest({
+        method: "post",
+        url: "https://api.hubapi.com/oauth/v1/token",
+        data: new URLSearchParams({
           grant_type: "refresh_token",
           client_id: HUBSPOT_CLIENT_ID,
           client_secret: HUBSPOT_CLIENT_SECRET,
           refresh_token: refreshToken,
         }),
-        { headers: { "Content-Type": "application/x-www-form-urlencoded" } },
-      );
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      });
       return {
         accessToken: response.data.access_token,
         refreshToken: response.data.refresh_token,
@@ -120,7 +122,9 @@ export class HubSpotOAuthService {
     email: string,
   ): Promise<string | null> {
     try {
-      const response = await axios.get("https://api.hubapi.com/crm/v3/owners", {
+      const response = await hubspotRequest({
+        method: "get",
+        url: "https://api.hubapi.com/crm/v3/owners",
         headers: { Authorization: `Bearer ${accessToken}` },
       });
 
