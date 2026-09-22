@@ -100,9 +100,6 @@ const getLinkedinAccountsData = async (
   return laCache; // warm — instant
 };
 
-const getLinkedinAccounts = async (ownerIds: string[]): Promise<LinkedinAccount[]> =>
-  (await getLinkedinAccountsData(ownerIds)).accounts;
-
 // These endpoints are gated by a shared API key (requireApiKey) plus
 // per-request role-based data scoping (resolveRequesterScope) — see
 // docs/superpowers/specs/2026-09-22-role-scoped-reports-api-design.md.
@@ -193,10 +190,20 @@ export const getFilters = async (
 ): Promise<void> => {
   try {
     const owners = await getConnectedOwners();
-    const scopedOwnerIds = applyRequesterScope(owners.map((o) => o.id), req.scopeOwnerIds);
+    const ownerIds = owners.map((o) => o.id);
+    const scopedOwnerIds = applyRequesterScope(ownerIds, req.scopeOwnerIds);
     const scopedOwners = owners.filter((o) => scopedOwnerIds.includes(o.id));
-    const { accounts: linkedinAccounts, pairs: ownerAccounts } =
-      await getLinkedinAccountsData(scopedOwnerIds);
+    // Always warm/read the shared cache with the FULL connected-owner list —
+    // it is a single process-global, unkeyed cache, so passing a requester's
+    // scoped subset here would let whichever requester's scope happens to
+    // warm it leak into every other requester's response for up to 30
+    // minutes (see laCache/laInFlight above). Scope down AFTER the cache
+    // read instead.
+    const { accounts: allLinkedinAccounts, pairs: allOwnerAccounts } =
+      await getLinkedinAccountsData(ownerIds);
+    const ownerAccounts = allOwnerAccounts.filter((p) => scopedOwnerIds.includes(p.ownerId));
+    const scopedAccountIds = new Set(ownerAccounts.map((p) => p.linkedinAccountId));
+    const linkedinAccounts = allLinkedinAccounts.filter((a) => scopedAccountIds.has(a.id));
     successResponse(
       res,
       { users: scopedOwners, linkedinAccounts, ownerAccounts },
@@ -277,7 +284,7 @@ export const getSummary = async (
       lateRows,
       missedBacklog,
       missedCrossings,
-      linkedinAccounts,
+      linkedinAccountsData,
       connectionsActivitySeriesByOwner,
       messagesSeriesByOwner,
       connectionsActivitySeriesByOwnerAccount,
@@ -330,7 +337,9 @@ export const getSummary = async (
       // reused for both the chart series AND the live KPI count below.
       MissedFollowUpService.getBacklog(messageOpts, now),
       LateMessageService.getFollowUpDeadlineCrossings(from, to, messageOpts),
-      getLinkedinAccounts(scopedOwnerIds),
+      // Same shared-cache-safety reasoning as getFilters above: always warm
+      // with the FULL owner list, then filter to scope below.
+      getLinkedinAccountsData(ownerIds),
       // Per-owner breakdown for the report chart's stacked segments — only
       // actually queried when the client asked for a breakdown (see
       // breakdownOwnerIds above); each ByOwner method itself already
@@ -361,6 +370,15 @@ export const getSummary = async (
         granularity,
       }),
     ]);
+
+    const linkedinAccountIdsInScope = new Set(
+      linkedinAccountsData.pairs
+        .filter((p) => scopedOwnerIds.includes(p.ownerId))
+        .map((p) => p.linkedinAccountId),
+    );
+    const linkedinAccounts = linkedinAccountsData.accounts.filter((a) =>
+      linkedinAccountIdsInScope.has(a.id),
+    );
 
     const lateSeries = LateMessageService.buildSeries(lateRows, granularity);
     const lateTotals = LateMessageService.buildTotals(lateRows);
