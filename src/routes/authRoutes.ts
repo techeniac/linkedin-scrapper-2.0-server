@@ -9,6 +9,11 @@ import {
   forgotPassword,
   resetPassword,
 } from "../controllers/authController";
+import {
+  createApiKey,
+  listApiKeys,
+  revokeApiKey,
+} from "../controllers/apiKeyController";
 import { body } from "express-validator";
 import { validate } from "../middlewares/validateRequest";
 import { authenticate } from "../middlewares/auth";
@@ -99,5 +104,24 @@ router.post(
 
 // GET /api/auth/profile - Get authenticated user profile
 router.get("/profile", authenticate, getProfile);
+
+// POST /api/auth/api-keys - Issue a shared API key for an external caller
+// (e.g. the Next.js reporting frontend). Self-service, gated by your own
+// login (authenticate) — not by any external caller.
+router.post(
+  "/api-keys",
+  authenticate,
+  [
+    body("name").isString().trim().notEmpty().withMessage("name is required"),
+    validate,
+  ],
+  createApiKey,
+);
+
+// GET /api/auth/api-keys - List issued keys (masked)
+router.get("/api-keys", authenticate, listApiKeys);
+
+// DELETE /api/auth/api-keys/:id - Revoke a key
+router.delete("/api-keys/:id", authenticate, revokeApiKey);
 
 export default router;
