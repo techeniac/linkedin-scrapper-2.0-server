@@ -12,6 +12,7 @@ import {
 } from "../services/hubspotOwnersService";
 import prisma from "../config/prisma";
 import { successResponse, errorResponse } from "../utils/apiResponse";
+import { PublicApiRequest } from "../types";
 
 type LinkedinAccount = { id: string; name: string | null };
 // Distinct (ownerId, linkedinAccountId) pairs — "which accounts has this
@@ -102,10 +103,12 @@ const getLinkedinAccountsData = async (
 const getLinkedinAccounts = async (ownerIds: string[]): Promise<LinkedinAccount[]> =>
   (await getLinkedinAccountsData(ownerIds)).accounts;
 
-// These endpoints are intentionally UNAUTHENTICATED (see publicRoutes.ts): they
-// serve read-only reporting data to the Chitragupt frontend (no login yet).
-// Scope is limited to HubSpot-CONNECTED owners only, and owner names come from
-// HubSpot (not our users table).
+// These endpoints are gated by a shared API key (requireApiKey) plus
+// per-request role-based data scoping (resolveRequesterScope) — see
+// docs/superpowers/specs/2026-09-22-role-scoped-reports-api-design.md.
+// Scope is limited to HubSpot-CONNECTED owners only, further narrowed to
+// whichever of those the requester is allowed to see (req.scopeOwnerIds);
+// owner names come from HubSpot (not our users table).
 
 // --- query param parsers ---
 const toInt = (v: unknown, def: number): number => {
@@ -184,16 +187,21 @@ const toGranularity = (v: unknown): "day" | "week" | "month" => {
 // LinkedIn accounts), both cached. Lets the Connections/Messages tables load
 // their filters WITHOUT triggering the summary's two chart-series aggregations.
 export const getFilters = async (
-  _req: Request,
+  req: PublicApiRequest,
   res: Response,
   next: NextFunction,
 ): Promise<void> => {
   try {
     const owners = await getConnectedOwners();
-    const { accounts: linkedinAccounts, pairs: ownerAccounts } = await getLinkedinAccountsData(
-      owners.map((o) => o.id),
+    const scopedOwnerIds = applyRequesterScope(owners.map((o) => o.id), req.scopeOwnerIds);
+    const scopedOwners = owners.filter((o) => scopedOwnerIds.includes(o.id));
+    const { accounts: linkedinAccounts, pairs: ownerAccounts } =
+      await getLinkedinAccountsData(scopedOwnerIds);
+    successResponse(
+      res,
+      { users: scopedOwners, linkedinAccounts, ownerAccounts },
+      "Filters retrieved",
     );
-    successResponse(res, { users: owners, linkedinAccounts, ownerAccounts }, "Filters retrieved");
   } catch (error) {
     next(error);
   }
@@ -203,7 +211,7 @@ export const getFilters = async (
 // plus the connected-owner list. Query: from?, to? (ISO), userId?.
 // The [from, to] window is capped at 60 days (defensively clamped here too).
 export const getSummary = async (
-  req: Request,
+  req: PublicApiRequest,
   res: Response,
   next: NextFunction,
 ): Promise<void> => {
@@ -221,7 +229,8 @@ export const getSummary = async (
 
     const owners = await getConnectedOwners();
     const ownerIds = owners.map((o) => o.id);
-    const userId = pickOwner(req.query.userId, ownerIds);
+    const scopedOwnerIds = applyRequesterScope(ownerIds, req.scopeOwnerIds);
+    const userId = pickOwner(req.query.userId, scopedOwnerIds);
     const linkedinId = toStr(req.query.linkedinId);
     const linkedinIds = toStrArray(req.query.linkedinAccountIds);
 
@@ -237,7 +246,7 @@ export const getSummary = async (
     // buildSeriesByOwner. Opt-in: only requested (and only computed) when the
     // client actually asks for it, so the common single/no-owner case never
     // pays for the extra grouping.
-    const breakdownOwnerIds = pickOwners(req.query.ownerIds, ownerIds);
+    const breakdownOwnerIds = pickOwners(req.query.ownerIds, scopedOwnerIds);
 
     // The SAME owner selection the client sent (breakdownOwnerIds) must also
     // scope every totals/non-split series query below — not just the ByOwner
@@ -248,7 +257,7 @@ export const getSummary = async (
     // the filtered subset — e.g. a bar showing one owner's "4" underneath a
     // total of "8" from other, hidden owners. Falls back to every connected
     // owner only when the client didn't request a specific scope at all.
-    const ownerScope = breakdownOwnerIds.length ? breakdownOwnerIds : ownerIds;
+    const ownerScope = breakdownOwnerIds.length ? breakdownOwnerIds : scopedOwnerIds;
 
     // Shared scope for the message-derived reports (Late Messages, Missed
     // Follow-Up) — both filter identically, so define once.
@@ -321,7 +330,7 @@ export const getSummary = async (
       // reused for both the chart series AND the live KPI count below.
       MissedFollowUpService.getBacklog(messageOpts, now),
       LateMessageService.getFollowUpDeadlineCrossings(from, to, messageOpts),
-      getLinkedinAccounts(ownerIds),
+      getLinkedinAccounts(scopedOwnerIds),
       // Per-owner breakdown for the report chart's stacked segments — only
       // actually queried when the client asked for a breakdown (see
       // breakdownOwnerIds above); each ByOwner method itself already
@@ -410,7 +419,7 @@ export const getSummary = async (
         missedFollowUpSeriesByOwner,
         missedFollowUpSeriesByOwnerAccount,
         missedFollowUpNow,
-        users: owners,
+        users: owners.filter((o) => scopedOwnerIds.includes(o.id)),
         linkedinAccounts,
       },
       "Summary retrieved",
