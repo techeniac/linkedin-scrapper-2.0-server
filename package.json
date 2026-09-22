@@ -13,6 +13,7 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:push": "prisma db push",
     "prisma:status": "prisma migrate status",
+    "test": "jest",
     "backfill:connection-events": "ts-node --transpile-only src/scripts/backfillConnectionRequestEvents.ts",
     "backfill:message-events": "ts-node --transpile-only src/scripts/backfillMessageEvents.ts"
   },
@@ -53,6 +54,7 @@
     "@types/nodemailer": "^8.0.0",
     "@types/sanitize-html": "^2.16.0",
     "jest": "^29.7.0",
+    "ts-jest": "^29.1.1",
     "prisma": "5.22.0",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.3.3"
