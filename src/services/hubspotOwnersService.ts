@@ -15,6 +15,7 @@ export interface ConnectedOwner {
   name: string | null; // HubSpot display name (falls back to DB name on failure)
   email: string | null; // our User.email — used to match an external caller's
   // x-requester-email / x-scope-emails headers to an internal owner id.
+  hubspotOwnerId: string; // raw HubSpot owner id — needed to scope HubSpot Search API calls
 }
 
 const HUBSPOT_BASE = "https://api.hubapi.com";
@@ -56,7 +57,7 @@ async function loadConnectedOwners(): Promise<ConnectedOwner[]> {
           // keep DB-name fallback
         }
       }
-      return { id: u.id, name, email: u.email ?? null };
+      return { id: u.id, name, email: u.email ?? null, hubspotOwnerId: u.hubspotOwnerId! };
     }),
   );
 }

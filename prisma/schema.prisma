@@ -27,6 +27,9 @@ model User {
   connectionEvents   ConnectionRequestEvent[]
   messageActivity    MessageActivity[]
   messageEvents      MessageEvent[]
+  forgottenLeadSnapshots ForgottenLeadSnapshot[]
+  nextStepGapSnapshots   NextStepGapSnapshot[]
+  scheduledNoTouchSnapshots ScheduledNoTouchSnapshot[]
 
   @@map("users")
 }
@@ -281,6 +284,88 @@ model MessageEvent {
   // this flag), so type isn't needed in the index.
   @@index([userId, isFollowUp, respondsToAt])
   @@map("message_events")
+}
+
+// Daily snapshot of "forgotten active leads" — active HubSpot contacts (not
+// Not Interested / not DND-Suspended) with no task or activity EVER recorded
+// (both Next Activity Date and Last Activity Date unknown). HubSpot Contact
+// state is never mirrored locally elsewhere in this codebase (see
+// hubspotContactService.ts — contacts are always fetched live), so unlike
+// ConnectionRequestEvent/MessageEvent this is NOT an append-only fact log —
+// it is a snapshot of a live HubSpot query result, taken at most once per
+// (user, UTC calendar day). Written lazily: the first /api/public/summary
+// request of the day for a given owner computes and stores it; every later
+// request that day reads the stored row instead of re-querying HubSpot. This
+// is what stands in for a cron job on a free-tier Vercel deployment that
+// cannot schedule sub-daily (or, depending on plan, any) cron runs.
+//
+// NOT additive across days like MessageEvent/ConnectionRequestEvent — a
+// backlog count is a gauge, not an event count. See ForgottenLeadService for
+// how this is reflected in getSeries (last-value-per-bucket, never summed
+// across days) and getTotals (latest row only).
+model ForgottenLeadSnapshot {
+  id           String   @id @default(uuid())
+  userId       String   @map("user_id")
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Truncated to UTC midnight — the calendar day this snapshot represents,
+  // not the instant it was computed (see createdAt for that).
+  snapshotDate DateTime @map("snapshot_date")
+  count        Int
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@unique([userId, snapshotDate])
+  @@index([snapshotDate])
+  @@map("forgotten_lead_snapshots")
+}
+
+// Daily snapshot of "No Next Step Scheduled" — active HubSpot contacts (same
+// active-status exclusion as ForgottenLeadSnapshot above) with Next Activity
+// Date unknown, split into two segments:
+//   touchedCount     : Last Activity Date IS known — someone engaged once and
+//                       then never scheduled a follow-up (the higher-priority
+//                       "dropped ball" segment).
+//   neverTouchedCount: Last Activity Date is ALSO unknown — nobody has ever
+//                       touched this lead at all (cold, lower priority).
+// Same lazy-snapshot mechanism as ForgottenLeadSnapshot (see that model's
+// comment for the full reasoning — no cron on Vercel's free tier, so the
+// first /api/public/summary request of the UTC day per owner computes +
+// stores this, every later request that day reads the stored row) and the
+// same GAUGE semantics (see NextStepGapService/NextStepGapRepository for how
+// getSeries/getTotals reflect that — never summed across days).
+model NextStepGapSnapshot {
+  id            String   @id @default(uuid())
+  userId        String   @map("user_id")
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  snapshotDate  DateTime @map("snapshot_date")
+  touchedCount  Int      @map("touched_count")
+  neverTouchedCount Int  @map("never_touched_count")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@unique([userId, snapshotDate])
+  @@index([snapshotDate])
+  @@map("next_step_gap_snapshots")
+}
+
+// Daily snapshot of "Scheduled, Never Touched" — active HubSpot contacts
+// (same active-status exclusion as the other 2 HubSpot-state graphs) where
+// Last Activity Date is unknown BUT Next Activity Date IS known — someone
+// scheduled a task/meeting for a contact they've never actually engaged.
+// The mirror-image quadrant of ForgottenLeadSnapshot (which requires BOTH
+// dates unknown) and NextStepGapSnapshot's "neverTouched" segment (same) —
+// this is the one quadrant neither of those graphs covers. Single count, no
+// segmentation (unlike NextStepGapSnapshot) — see NextStepGapService for the
+// GAUGE-not-event-count reasoning this also follows.
+model ScheduledNoTouchSnapshot {
+  id           String   @id @default(uuid())
+  userId       String   @map("user_id")
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  snapshotDate DateTime @map("snapshot_date")
+  count        Int
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@unique([userId, snapshotDate])
+  @@index([snapshotDate])
+  @@map("scheduled_no_touch_snapshots")
 }
 
 // Hashed, rotating refresh tokens for user sessions (7-day TTL).
