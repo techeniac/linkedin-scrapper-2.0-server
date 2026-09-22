@@ -18,7 +18,7 @@ router.use("/auth", authRoutes);
 router.use("/hubspot", hubspotRoutes);
 router.use("/connections", connectionRoutes);
 router.use("/messages", messageRoutes);
-// Public, unauthenticated read-only endpoints for the reporting frontend.
+// API-key-gated, role-scoped read-only endpoints for the external reporting frontend.
 router.use("/public", publicRoutes);
 
 export default router;

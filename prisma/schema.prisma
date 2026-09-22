@@ -413,3 +413,22 @@ model OAuthState {
   @@index([state])
   @@index([expiresAt])
 }
+
+// Shared, revocable credential for a trusted server-to-server caller (see
+// docs/superpowers/specs/2026-09-22-role-scoped-reports-api-design.md). One
+// row per issued key, not tied to a specific human — only the SHA-256 hash
+// is stored, same pattern as RefreshToken above. expiresAt is stored but not
+// enforced by default (no auto-expiry today; present so a future expiry
+// policy needs no migration).
+model ApiKey {
+  id         String    @id @default(uuid())
+  name       String
+  keyHash    String    @unique @map("key_hash")
+  keyPrefix  String    @map("key_prefix")
+  revokedAt  DateTime? @map("revoked_at")
+  lastUsedAt DateTime? @map("last_used_at")
+  expiresAt  DateTime? @map("expires_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  @@map("api_keys")
+}

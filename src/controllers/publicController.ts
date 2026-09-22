@@ -17,6 +17,7 @@ import {
 } from "../services/hubspotOwnersService";
 import prisma from "../config/prisma";
 import { successResponse, errorResponse } from "../utils/apiResponse";
+import { PublicApiRequest } from "../types";
 
 type LinkedinAccount = { id: string; name: string | null };
 // Distinct (ownerId, linkedinAccountId) pairs — "which accounts has this
@@ -104,9 +105,6 @@ const getLinkedinAccountsData = async (
   return laCache; // warm — instant
 };
 
-const getLinkedinAccounts = async (ownerIds: string[]): Promise<LinkedinAccount[]> =>
-  (await getLinkedinAccountsData(ownerIds)).accounts;
-
 // "Connected On" option list for the Forgotten Active Leads report's filter —
 // HubSpot's `contact_source` property (which rep's LinkedIn profile sourced
 // a contact; already surfaced elsewhere in this codebase under the same
@@ -168,10 +166,12 @@ const getConnectedOnSources = async (ownerIds: string[]): Promise<FilterOption[]
   return coCache.options; // warm — instant
 };
 
-// These endpoints are intentionally UNAUTHENTICATED (see publicRoutes.ts): they
-// serve read-only reporting data to the Chitragupt frontend (no login yet).
-// Scope is limited to HubSpot-CONNECTED owners only, and owner names come from
-// HubSpot (not our users table).
+// These endpoints are gated by a shared API key (requireApiKey) plus
+// per-request role-based data scoping (resolveRequesterScope) — see
+// docs/superpowers/specs/2026-09-22-role-scoped-reports-api-design.md.
+// Scope is limited to HubSpot-CONNECTED owners only, further narrowed to
+// whichever of those the requester is allowed to see (req.scopeOwnerIds);
+// owner names come from HubSpot (not our users table).
 
 // --- query param parsers ---
 const toInt = (v: unknown, def: number): number => {
@@ -216,6 +216,21 @@ const pickOwner = (v: unknown, ownerIds: string[]): string | undefined => {
 const pickOwners = (v: unknown, ownerIds: string[]): string[] =>
   toStrArray(v).filter((id) => ownerIds.includes(id));
 
+// Intersects a full owner-id list with the requester's allowed scope.
+// null means unrestricted (x-scope: all — see requesterScope.ts). undefined
+// means resolveRequesterScope hasn't run (shouldn't happen once publicRoutes
+// wires it in — see Task 12) — fails closed to "no access" rather than
+// silently falling back to unrestricted.
+export const applyRequesterScope = (
+  ownerIds: string[],
+  scopeOwnerIds: string[] | null | undefined,
+): string[] => {
+  if (scopeOwnerIds === null) return ownerIds;
+  if (!scopeOwnerIds) return [];
+  const allowed = new Set(scopeOwnerIds);
+  return ownerIds.filter((id) => allowed.has(id));
+};
+
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 // Per-granularity window caps (defensive; the client enforces the exact limit).
@@ -235,23 +250,37 @@ const toGranularity = (v: unknown): "day" | "week" | "month" => {
 // LinkedIn accounts), both cached. Lets the Connections/Messages tables load
 // their filters WITHOUT triggering the summary's two chart-series aggregations.
 export const getFilters = async (
-  _req: Request,
+  req: PublicApiRequest,
   res: Response,
   next: NextFunction,
 ): Promise<void> => {
   try {
     const owners = await getConnectedOwners();
     const ownerIds = owners.map((o) => o.id);
-    const { accounts: linkedinAccounts, pairs: ownerAccounts } = await getLinkedinAccountsData(ownerIds);
+    const scopedOwnerIds = applyRequesterScope(ownerIds, req.scopeOwnerIds);
+    const scopedOwners = owners.filter((o) => scopedOwnerIds.includes(o.id));
+    // Always warm/read the shared cache with the FULL connected-owner list —
+    // it is a single process-global, unkeyed cache, so passing a requester's
+    // scoped subset here would let whichever requester's scope happens to
+    // warm it leak into every other requester's response for up to 30
+    // minutes (see laCache/laInFlight above). Scope down AFTER the cache
+    // read instead.
+    const { accounts: allLinkedinAccounts, pairs: allOwnerAccounts } =
+      await getLinkedinAccountsData(ownerIds);
+    const ownerAccounts = allOwnerAccounts.filter((p) => scopedOwnerIds.includes(p.ownerId));
+    const scopedAccountIds = new Set(ownerAccounts.map((p) => p.linkedinAccountId));
+    const linkedinAccounts = allLinkedinAccounts.filter((a) => scopedAccountIds.has(a.id));
     // A cold-start failure here must degrade to an empty list for THIS
     // response only — not throw and 500 the whole /public/filters endpoint
     // (which every report's toolbar depends on), and not get cached as a
     // false "there are no sources" answer (loadConnectedOnSources already
     // guarantees a failure never reaches coCache; see its own comment).
+    // connectedOnSources is a portal-wide property, not per-owner data, so it
+    // is intentionally NOT scoped to the requester (same for every caller).
     const connectedOnSources = await getConnectedOnSources(ownerIds).catch(() => []);
     successResponse(
       res,
-      { users: owners, linkedinAccounts, ownerAccounts, connectedOnSources },
+      { users: scopedOwners, linkedinAccounts, ownerAccounts, connectedOnSources },
       "Filters retrieved",
     );
   } catch (error) {
@@ -263,7 +292,7 @@ export const getFilters = async (
 // plus the connected-owner list. Query: from?, to? (ISO), userId?.
 // The [from, to] window is capped at 60 days (defensively clamped here too).
 export const getSummary = async (
-  req: Request,
+  req: PublicApiRequest,
   res: Response,
   next: NextFunction,
 ): Promise<void> => {
@@ -296,7 +325,8 @@ export const getSummary = async (
       ),
     ]);
     const ownerIds = owners.map((o) => o.id);
-    const userId = pickOwner(req.query.userId, ownerIds);
+    const scopedOwnerIds = applyRequesterScope(ownerIds, req.scopeOwnerIds);
+    const userId = pickOwner(req.query.userId, scopedOwnerIds);
     const linkedinId = toStr(req.query.linkedinId);
     const linkedinIds = toStrArray(req.query.linkedinAccountIds);
 
@@ -312,7 +342,7 @@ export const getSummary = async (
     // buildSeriesByOwner. Opt-in: only requested (and only computed) when the
     // client actually asks for it, so the common single/no-owner case never
     // pays for the extra grouping.
-    const breakdownOwnerIds = pickOwners(req.query.ownerIds, ownerIds);
+    const breakdownOwnerIds = pickOwners(req.query.ownerIds, scopedOwnerIds);
 
     // The SAME owner selection the client sent (breakdownOwnerIds) must also
     // scope every totals/non-split series query below — not just the ByOwner
@@ -323,7 +353,7 @@ export const getSummary = async (
     // the filtered subset — e.g. a bar showing one owner's "4" underneath a
     // total of "8" from other, hidden owners. Falls back to every connected
     // owner only when the client didn't request a specific scope at all.
-    const ownerScope = breakdownOwnerIds.length ? breakdownOwnerIds : ownerIds;
+    const ownerScope = breakdownOwnerIds.length ? breakdownOwnerIds : scopedOwnerIds;
 
     // Shared scope for the message-derived reports (Late Messages, Missed
     // Follow-Up) — both filter identically, so define once.
@@ -343,7 +373,7 @@ export const getSummary = async (
       lateRows,
       missedBacklog,
       missedCrossings,
-      linkedinAccounts,
+      linkedinAccountsData,
       connectionsActivitySeriesByOwner,
       messagesSeriesByOwner,
       connectionsActivitySeriesByOwnerAccount,
@@ -402,7 +432,9 @@ export const getSummary = async (
       // reused for both the chart series AND the live KPI count below.
       MissedFollowUpService.getBacklog(messageOpts, now),
       LateMessageService.getFollowUpDeadlineCrossings(from, to, messageOpts),
-      getLinkedinAccounts(ownerIds),
+      // Same shared-cache-safety reasoning as getFilters above: always warm
+      // with the FULL owner list, then filter to scope below.
+      getLinkedinAccountsData(ownerIds),
       // Per-owner breakdown for the report chart's stacked segments — only
       // actually queried when the client asked for a breakdown (see
       // breakdownOwnerIds above); each ByOwner method itself already
@@ -451,6 +483,15 @@ export const getSummary = async (
       }),
       ScheduledNoTouchService.getSeriesByOwner(from, to, breakdownOwnerIds, { granularity }),
     ]);
+
+    const linkedinAccountIdsInScope = new Set(
+      linkedinAccountsData.pairs
+        .filter((p) => scopedOwnerIds.includes(p.ownerId))
+        .map((p) => p.linkedinAccountId),
+    );
+    const linkedinAccounts = linkedinAccountsData.accounts.filter((a) =>
+      linkedinAccountIdsInScope.has(a.id),
+    );
 
     const lateSeries = LateMessageService.buildSeries(lateRows, granularity);
     const lateTotals = LateMessageService.buildTotals(lateRows);
@@ -525,7 +566,7 @@ export const getSummary = async (
         scheduledNoTouchSeries,
         scheduledNoTouchSeriesByOwner,
         scheduledNoTouchTotal,
-        users: owners,
+        users: owners.filter((o) => scopedOwnerIds.includes(o.id)),
         linkedinAccounts,
       },
       "Summary retrieved",
@@ -537,15 +578,19 @@ export const getSummary = async (
 
 // Resolves the owner scope for a list endpoint: a single validated userId
 // (from ?userId), else a validated multi-select subset (from ?userIds), else
-// every connected owner (today's existing "no filter" behaviour).
-const resolveOwnerScope = (
-  req: Request,
+// every owner the requester is allowed to see. The candidate ownerIds list is
+// first narrowed to the requester's scope (see applyRequesterScope) — a
+// query param can never widen access beyond what x-requester-email/
+// x-scope-emails/x-scope already granted.
+export const resolveOwnerScope = (
+  req: Request & { scopeOwnerIds?: string[] | null },
   ownerIds: string[],
 ): { userId: string | undefined; userIds: string[] | undefined } => {
-  const userId = pickOwner(req.query.userId, ownerIds);
+  const scopedIds = applyRequesterScope(ownerIds, req.scopeOwnerIds);
+  const userId = pickOwner(req.query.userId, scopedIds);
   if (userId) return { userId, userIds: undefined };
-  const userIds = pickOwners(req.query.userIds, ownerIds);
-  return { userId: undefined, userIds: userIds.length > 0 ? userIds : ownerIds };
+  const userIds = pickOwners(req.query.userIds, scopedIds);
+  return { userId: undefined, userIds: userIds.length > 0 ? userIds : scopedIds };
 };
 
 // Same shape for the LinkedIn-account dimension: a single value (?linkedinId)
