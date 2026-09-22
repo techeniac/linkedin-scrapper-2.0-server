@@ -13,6 +13,8 @@ import logger from "../utils/logger";
 export interface ConnectedOwner {
   id: string; // our User.id
   name: string | null; // HubSpot display name (falls back to DB name on failure)
+  email: string | null; // our User.email — used to match an external caller's
+  // x-requester-email / x-scope-emails headers to an internal owner id.
 }
 
 const HUBSPOT_BASE = "https://api.hubapi.com";
@@ -34,7 +36,7 @@ async function loadConnectedOwners(): Promise<ConnectedOwner[]> {
       hubspotRefreshToken: { not: null },
       hubspotOwnerId: { not: null },
     },
-    select: { id: true, name: true, hubspotOwnerId: true },
+    select: { id: true, name: true, hubspotOwnerId: true, email: true },
   });
 
   return Promise.all(
@@ -54,7 +56,7 @@ async function loadConnectedOwners(): Promise<ConnectedOwner[]> {
           // keep DB-name fallback
         }
       }
-      return { id: u.id, name };
+      return { id: u.id, name, email: u.email ?? null };
     }),
   );
 }
@@ -98,4 +100,16 @@ export async function getConnectedOwnerIds(): Promise<string[]> {
 
 export async function getConnectedOwnerNameMap(): Promise<Map<string, string | null>> {
   return new Map((await getConnectedOwners()).map((o) => [o.id, o.name]));
+}
+
+// Resolves a single connected owner by email (case-insensitive exact match).
+// Used by resolveRequesterScope (middlewares/requesterScope.ts) to map the
+// external caller's x-requester-email / x-scope-emails headers to internal
+// owner ids.
+export async function getConnectedOwnerByEmail(
+  email: string,
+): Promise<ConnectedOwner | undefined> {
+  const target = email.trim().toLowerCase();
+  const owners = await getConnectedOwners();
+  return owners.find((o) => o.email?.toLowerCase() === target);
 }
