@@ -150,6 +150,21 @@ const pickOwner = (v: unknown, ownerIds: string[]): string | undefined => {
 const pickOwners = (v: unknown, ownerIds: string[]): string[] =>
   toStrArray(v).filter((id) => ownerIds.includes(id));
 
+// Intersects a full owner-id list with the requester's allowed scope.
+// null means unrestricted (x-scope: all — see requesterScope.ts). undefined
+// means resolveRequesterScope hasn't run (shouldn't happen once publicRoutes
+// wires it in — see Task 12) — fails closed to "no access" rather than
+// silently falling back to unrestricted.
+export const applyRequesterScope = (
+  ownerIds: string[],
+  scopeOwnerIds: string[] | null | undefined,
+): string[] => {
+  if (scopeOwnerIds === null) return ownerIds;
+  if (!scopeOwnerIds) return [];
+  const allowed = new Set(scopeOwnerIds);
+  return ownerIds.filter((id) => allowed.has(id));
+};
+
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 // Per-granularity window caps (defensive; the client enforces the exact limit).
@@ -407,15 +422,19 @@ export const getSummary = async (
 
 // Resolves the owner scope for a list endpoint: a single validated userId
 // (from ?userId), else a validated multi-select subset (from ?userIds), else
-// every connected owner (today's existing "no filter" behaviour).
-const resolveOwnerScope = (
-  req: Request,
+// every owner the requester is allowed to see. The candidate ownerIds list is
+// first narrowed to the requester's scope (see applyRequesterScope) — a
+// query param can never widen access beyond what x-requester-email/
+// x-scope-emails/x-scope already granted.
+export const resolveOwnerScope = (
+  req: Request & { scopeOwnerIds?: string[] | null },
   ownerIds: string[],
 ): { userId: string | undefined; userIds: string[] | undefined } => {
-  const userId = pickOwner(req.query.userId, ownerIds);
+  const scopedIds = applyRequesterScope(ownerIds, req.scopeOwnerIds);
+  const userId = pickOwner(req.query.userId, scopedIds);
   if (userId) return { userId, userIds: undefined };
-  const userIds = pickOwners(req.query.userIds, ownerIds);
-  return { userId: undefined, userIds: userIds.length > 0 ? userIds : ownerIds };
+  const userIds = pickOwners(req.query.userIds, scopedIds);
+  return { userId: undefined, userIds: userIds.length > 0 ? userIds : scopedIds };
 };
 
 // Same shape for the LinkedIn-account dimension: a single value (?linkedinId)
