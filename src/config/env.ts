@@ -16,8 +16,8 @@ export const JWT_SECRET = process.env.JWT_SECRET;
 // Kept as a fallback; access tokens now use ACCESS_TOKEN_TTL.
 export const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "7d";
 
-// Access token: short-lived JWT. Refresh token: long-lived opaque token.
-export const ACCESS_TOKEN_TTL = process.env.ACCESS_TOKEN_TTL || "15m";
+// Access token: JWT. Refresh token: long-lived opaque token.
+export const ACCESS_TOKEN_TTL = process.env.ACCESS_TOKEN_TTL || "7d";
 export const REFRESH_TOKEN_TTL_DAYS = parseInt(
   process.env.REFRESH_TOKEN_TTL_DAYS || "7",
 );
