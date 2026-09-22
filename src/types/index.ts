@@ -34,6 +34,17 @@ export interface AuthRequest extends Request {
   user?: User;
 }
 
+// Request shape for the /api/public/* router once requireApiKey and
+// resolveRequesterScope have run. scopeOwnerIds is null for an unrestricted
+// requester (x-scope: all) and undefined only if resolveRequesterScope
+// hasn't run yet — publicController.ts's applyRequesterScope treats
+// undefined as "deny everything" (fail-closed), not "allow everything".
+export interface PublicApiRequest extends Request {
+  apiKeyId?: string;
+  requesterOwnerId?: string;
+  scopeOwnerIds?: string[] | null;
+}
+
 // Login request payload
 export interface LoginRequest {
   email: string;
