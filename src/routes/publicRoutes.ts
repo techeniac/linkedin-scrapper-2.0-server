@@ -7,18 +7,20 @@ import {
   getLateMessages,
   getMissedFollowUps,
 } from "../controllers/publicController";
-import { requirePublicApiKey } from "../middlewares/publicApiKey";
-import { authenticate } from "../middlewares/auth";
+import { requireApiKey } from "../middlewares/apiKey";
+import { resolveRequesterScope } from "../middlewares/requesterScope";
 
-// Read-only router serving global connection/message data to the reporting
-// frontend. Gated behind `authenticate` (same JWT/users-table auth as the
-// rest of the API) plus the optional shared-secret `requirePublicApiKey`
-// no-op layer. Still inherits the global IP `apiLimiter` from routes/index.ts.
+// Read-only router serving global connection/message data to the external
+// reporting frontend (a separate project, server-to-server only). Gated by a
+// shared, revocable API key (requireApiKey) plus per-request, role-based
+// data scoping resolved from trusted headers (resolveRequesterScope) — see
+// docs/superpowers/specs/2026-09-22-role-scoped-reports-api-design.md.
+// Still inherits the global IP `apiLimiter` from routes/index.ts.
 // Do NOT add write endpoints here.
 const router = Router();
 
-router.use(requirePublicApiKey);
-router.use(authenticate);
+router.use(requireApiKey);
+router.use(resolveRequesterScope);
 
 router.get("/summary", getSummary);
 router.get("/filters", getFilters);
