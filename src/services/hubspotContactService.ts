@@ -256,8 +256,9 @@ export class HubSpotContactService {
       const results = response.data?.results ?? [];
       const matched = results.find((contact: any) => {
         const url = contact.properties?.hs_linkedin_url || "";
+        const cleanUrl = url.split("?")[0].split("#")[0];
         return (
-          url.endsWith(`/in/${username}`) || url.endsWith(`/in/${username}/`)
+          cleanUrl.endsWith(`/in/${username}`) || cleanUrl.endsWith(`/in/${username}/`)
         );
       });
 
