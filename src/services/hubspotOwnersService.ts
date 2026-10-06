@@ -114,3 +114,18 @@ export async function getConnectedOwnerByEmail(
   const owners = await getConnectedOwners();
   return owners.find((o) => o.email?.toLowerCase() === target);
 }
+
+// Resolves ANY registered user by email (HubSpot-connected or not). Used by
+// resolveRequesterScope to authenticate the x-requester-email identity itself
+// — the API key already gates the whole router, so this is identity lookup,
+// not a data-access boundary. A non-connected requester still gets no
+// hubspotOwnerId, so their self-scope default returns no report rows (see
+// requesterScope.ts); they need x-scope: all or x-scope-emails naming a
+// connected owner to see any data.
+export async function getUserIdByEmail(email: string): Promise<string | undefined> {
+  const user = await prisma.user.findFirst({
+    where: { email: { equals: email.trim(), mode: "insensitive" } },
+    select: { id: true },
+  });
+  return user?.id;
+}
