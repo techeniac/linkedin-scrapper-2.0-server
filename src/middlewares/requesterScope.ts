@@ -1,5 +1,8 @@
 import { Response, NextFunction } from "express";
-import { getConnectedOwnerByEmail } from "../services/hubspotOwnersService";
+import {
+  getConnectedOwnerByEmail,
+  getUserIdByEmail,
+} from "../services/hubspotOwnersService";
 import { PublicApiRequest } from "../types";
 import { ForbiddenError, ValidationError } from "../errors/AppError";
 import logger from "../utils/logger";
@@ -17,9 +20,13 @@ const header = (v: string | string[] | undefined): string | undefined =>
 //   x-scope-emails (optional)    — comma-separated emails this person may
 //                                   see; the requester's own id is always
 //                                   included even if omitted from the list.
-// Fail-closed: neither optional header given -> self only (req.scopeOwnerIds
-// = [requesterOwnerId]). An x-requester-email that isn't a recognized
-// connected owner is a 403; a missing one is a 400.
+// The API key already gates the whole router, so x-requester-email is
+// checked against ANY registered user (not just HubSpot-connected ones) —
+// it's identity, not a data-access boundary. Fail-closed: neither optional
+// header given -> self only (req.scopeOwnerIds = [requesterOwnerId]), which
+// comes back empty if the requester isn't a connected owner (no
+// hubspotOwnerId to filter report data by). An x-requester-email that
+// matches no user at all is a 403; a missing header is a 400.
 export const resolveRequesterScope = async (
   req: PublicApiRequest,
   _res: Response,
@@ -31,12 +38,12 @@ export const resolveRequesterScope = async (
       return next(new ValidationError("x-requester-email header is required"));
     }
 
-    const requester = await getConnectedOwnerByEmail(requesterEmail);
-    if (!requester) {
+    const requesterId = await getUserIdByEmail(requesterEmail);
+    if (!requesterId) {
       return next(new ForbiddenError("Requester is not a recognized owner"));
     }
 
-    req.requesterOwnerId = requester.id;
+    req.requesterOwnerId = requesterId;
 
     const scopeHeader = toStr(header(req.headers["x-scope"]));
     if (scopeHeader === "all") {
@@ -59,12 +66,12 @@ export const resolveRequesterScope = async (
           logger.warn("[requesterScope] dropping unrecognized scope email", { email });
         }
       }
-      resolved.add(requester.id); // always include the requester's own id
+      resolved.add(requesterId); // always include the requester's own id
       req.scopeOwnerIds = Array.from(resolved);
       return next();
     }
 
-    req.scopeOwnerIds = [requester.id]; // safe default: self only
+    req.scopeOwnerIds = [requesterId]; // safe default: self only
     next();
   } catch (error) {
     next(error);
