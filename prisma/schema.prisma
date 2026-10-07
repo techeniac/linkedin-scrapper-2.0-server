@@ -414,6 +414,28 @@ model ConversationOwnerCache {
   @@map("conversation_owner_cache")
 }
 
+// Append-only audit trail for manual owner overrides (see
+// docs/superpowers/specs/2026-10-07-hubspot-owner-attribution-name-match-design.md).
+// Insert-only — a conversation_owner_cache upsert alone would silently lose
+// who performed a PRIOR override once a later one overwrites it.
+// performedByEmail is a plain string (the trusted x-requester-email header),
+// not a User FK: the human performing the override may not be a row in this
+// service's own User table (see the design doc's auth-model correction).
+// newOwnerId/oldOwnerId are plain strings too, not User FKs, for the same
+// reason the FK on this table is deliberately omitted — this table only
+// ever needs to record what happened, not enforce it.
+model OwnerOverrideAudit {
+  id               String   @id @default(uuid())
+  conversationKey  String   @map("conversation_key")
+  oldOwnerId       String?  @map("old_owner_id")
+  newOwnerId       String   @map("new_owner_id")
+  performedByEmail String   @map("performed_by_email")
+  performedAt      DateTime @default(now()) @map("performed_at")
+
+  @@index([conversationKey])
+  @@map("owner_override_audit")
+}
+
 // Hashed, rotating refresh tokens for user sessions (7-day TTL).
 // Only the SHA-256 hash of the opaque token is stored, so a DB leak
 // exposes no usable tokens. Rotation + reuse detection guard against theft.
