@@ -42,9 +42,8 @@ import logger from "../utils/logger";
 import { ConversationOwnerCacheRepository } from "../repositories/conversationOwnerCacheRepository";
 import { MessageEventRepository } from "../repositories/messageEventRepository";
 import { HubSpotContextService } from "./hubspotContextService";
-import { extractLinkedInHandle } from "./hubspotHelpers";
 
-export type AttributionSource = "hubspot" | "fallback";
+export type AttributionSource = "hubspot" | "fallback" | "ambiguous";
 
 export interface ResolvedOwner {
   ownerId: string | null;
@@ -84,40 +83,50 @@ export class MessageOwnerResolverService {
     conversationKey: string,
     scraperUserId: string,
   ): Promise<ResolvedOwner> {
-    // MessageEvent only stores participantLinkedinId as LinkedIn's internal
-    // "aco" id (not a usable profile handle) — MessageActivity is the only
-    // place the actual profile URL is stored, keyed by the scraper who
-    // recorded it. A missing/unparseable handle is a genuine, permanent
-    // "can't resolve, and never will from this data" case — NOT part of the
-    // transient-failure handling below, so it's deliberately outside that
-    // try/catch.
+    // The name LinkedIn already gives at message-sync time — see the design
+    // doc: LinkedIn's message-thread data never carries a resolvable vanity
+    // handle, so the URN-based lookup this used to do always missed. A
+    // missing name is a genuine, permanent "can't resolve, and never will
+    // from this data" case — deliberately outside the try/catch below (no
+    // HubSpot call is even attempted).
     const activity = await prisma.messageActivity.findUnique({
       where: { userId_conversationKey: { userId: scraperUserId, conversationKey } },
-      select: { participantProfileUrl: true },
+      select: { participantName: true },
     });
-    const handle = extractLinkedInHandle(activity?.participantProfileUrl ?? null);
-    if (!handle) return { ownerId: null, source: "fallback" };
+    const name = activity?.participantName?.trim();
+    if (!name) return { ownerId: null, source: "ambiguous" };
+
+    const [firstName, ...rest] = name.split(" ");
+    const lastName = rest.join(" ");
 
     // Only the actual HubSpot round-trip can fail transiently (scraper not
     // HubSpot-connected, rate limit, network blip) — those failures must NOT
-    // be cached as a permanent "no owner" fact. See file header.
-    let hubspotOwnerId: string | null;
+    // be cached as a permanent fact. See file header.
+    let match: { ownerId: string | null; matchCount: number };
     try {
       const { syncService } = await HubSpotContextService.getContext(scraperUserId);
-      hubspotOwnerId = await syncService.findContactOwnerIdByProfileUrl(handle);
+      match = await syncService.findContactOwnerIdByName(firstName, lastName);
     } catch (err: any) {
       logger.warn(
         `[MessageOwnerResolver] transient resolution failure for conversation ${conversationKey}: ${err?.message}`,
       );
       return { ownerId: null, source: "fallback", transient: true };
     }
-    if (!hubspotOwnerId) return { ownerId: null, source: "fallback" };
+
+    // 0 matches, 2+ matches, or exactly 1 match with no HubSpot owner set —
+    // no disambiguation signal exists in captured data for any of these.
+    if (match.matchCount !== 1 || !match.ownerId) {
+      return { ownerId: null, source: "ambiguous" };
+    }
 
     const user = await prisma.user.findFirst({
-      where: { hubspotOwnerId },
+      where: { hubspotOwnerId: match.ownerId },
       select: { id: true },
     });
-    if (!user) return { ownerId: null, source: "fallback" };
+    // A real HubSpot owner exists but isn't a connected Techeniac user — not
+    // a transient failure (HubSpot answered definitively), and not a
+    // resolution either. See this plan's Global Constraints ruling.
+    if (!user) return { ownerId: null, source: "ambiguous" };
 
     return { ownerId: user.id, source: "hubspot" };
   }
