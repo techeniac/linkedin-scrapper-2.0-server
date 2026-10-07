@@ -48,7 +48,10 @@ import { computeFollowUpDeadline, LateMessageService } from "./lateMessageServic
  */
 
 interface BacklogRow {
+  // Effective owner — see MissedFollowUpRepository/LateMessageRepository.
   userId: string;
+  // Raw scraper id — used ONLY to join back to MessageActivity.
+  scraperUserId: string;
   conversationKey: string;
   lastSentAt: Date;
   deadline: Date;
@@ -97,6 +100,7 @@ export class MissedFollowUpService {
       .filter((e) => e.type === "SENT")
       .map((e) => ({
         userId: e.userId,
+        scraperUserId: e.scraperUserId,
         conversationKey: e.conversationKey,
         lastSentAt: e.occurredAt,
         deadline: computeFollowUpDeadline(e.occurredAt),
@@ -288,7 +292,10 @@ export class MissedFollowUpService {
     };
 
     interface HistoryRow {
+      // Effective owner — this is what gets returned to the caller.
       userId: string;
+      // Raw scraper id — used ONLY to join back to MessageActivity.
+      scraperUserId: string;
       conversationKey: string;
       status: "STILL_MISSING" | "RESOLVED_LATE";
       missedSince: Date;
@@ -316,6 +323,7 @@ export class MissedFollowUpService {
       if (existing && existing.recency > r.occurredAt.getTime()) continue;
       byConversation.set(key, {
         userId: r.userId,
+        scraperUserId: r.scraperUserId,
         conversationKey: r.conversationKey,
         status: "RESOLVED_LATE",
         missedSince: r.respondsToAt,
@@ -329,6 +337,7 @@ export class MissedFollowUpService {
       const key = `${r.userId}:${r.conversationKey}`;
       byConversation.set(key, {
         userId: r.userId,
+        scraperUserId: r.scraperUserId,
         conversationKey: r.conversationKey,
         status: "STILL_MISSING",
         missedSince: r.lastSentAt,
@@ -347,13 +356,14 @@ export class MissedFollowUpService {
     const total = rows.length;
     const page_ = rows.slice((page - 1) * limit, (page - 1) * limit + limit);
 
+    // MessageActivity is keyed by the SCRAPER's userId, not the effective owner.
     const activities = await LateMessageRepository.findActivityIdentities(
-      page_.map((r) => ({ userId: r.userId, conversationKey: r.conversationKey })),
+      page_.map((r) => ({ userId: r.scraperUserId, conversationKey: r.conversationKey })),
     );
     const byKey = new Map(activities.map((a) => [`${a.userId}:${a.conversationKey}`, a]));
 
     const data = page_.map((r) => {
-      const activity = byKey.get(`${r.userId}:${r.conversationKey}`);
+      const activity = byKey.get(`${r.scraperUserId}:${r.conversationKey}`);
       return {
         userId: r.userId,
         conversationKey: r.conversationKey,

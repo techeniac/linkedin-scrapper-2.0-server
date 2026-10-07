@@ -290,6 +290,74 @@ export class HubSpotContactService {
     }
   }
 
+  /**
+   * Exact (case-insensitive, trimmed) first+last name match against HubSpot
+   * contacts, searched across all owners' contacts — same scope as
+   * findContactByProfileUrl. Uses HubSpot's EQ operator (case-insensitive)
+   * on both firstname and lastname, then re-checks exact equality
+   * client-side anyway — belt-and-suspenders against any HubSpot-side case
+   * handling edge case, same two-step pattern as searchContactByUsername
+   * above.
+   *
+   * matchCount distinguishes the three outcomes a caller needs: 0 (no
+   * contact with this name), 1 (safe to use ownerId, which may itself be
+   * null if the contact has no HubSpot owner), 2+ (collision — no signal
+   * in captured data to disambiguate, caller must not guess).
+   */
+  async findContactOwnerIdByName(
+    firstName: string,
+    lastName: string,
+  ): Promise<{ ownerId: string | null; matchCount: number }> {
+    const fn = firstName.trim();
+    const ln = lastName.trim();
+    // A lone first name (no captured last name) has no safe HubSpot filter
+    // to narrow on — searching by firstname alone would return every
+    // contact sharing that first name. Treat as a guaranteed non-1 match
+    // without ever calling HubSpot.
+    if (!fn || !ln) return { ownerId: null, matchCount: fn || ln ? 2 : 0 };
+
+    try {
+      const response = await axios.post(
+        `${this.baseUrl}/crm/v3/objects/contacts/search`,
+        {
+          filterGroups: [
+            {
+              filters: [
+                { propertyName: "firstname", operator: "EQ", value: fn },
+                { propertyName: "lastname", operator: "EQ", value: ln },
+              ],
+            },
+          ],
+          properties: ["firstname", "lastname", "hubspot_owner_id"],
+          limit: 10,
+        },
+        { headers: this.headers },
+      );
+
+      const results = response.data?.results ?? [];
+      const matches = results.filter((contact: any) => {
+        const cf = (contact.properties?.firstname || "").trim().toLowerCase();
+        const cl = (contact.properties?.lastname || "").trim().toLowerCase();
+        return cf === fn.toLowerCase() && cl === ln.toLowerCase();
+      });
+
+      // If HubSpot reports more total matches than this page returned, the
+      // true match count is unknown (could be 2+ exact matches split across
+      // pages) — never collapse that uncertainty down to a false matchCount
+      // of 1.
+      const total = response.data?.total ?? results.length;
+      const matchCount = total > results.length ? Math.max(matches.length, 2) : matches.length;
+
+      if (matchCount !== 1) return { ownerId: null, matchCount };
+      return { ownerId: matches[0].properties?.hubspot_owner_id ?? null, matchCount: 1 };
+    } catch (err: any) {
+      if (err.response?.status === 404 || err.response?.status === 400) {
+        return { ownerId: null, matchCount: 0 };
+      }
+      throw err;
+    }
+  }
+
   async updateContactByUsername(
     username: string,
     updates: {

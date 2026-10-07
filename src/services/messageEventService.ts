@@ -2,6 +2,8 @@
 import { MessageEventType } from "@prisma/client";
 import { randomUUID } from "crypto";
 import { MessageEventRepository, QualifyingEventRow } from "../repositories/messageEventRepository";
+import { MessageOwnerResolverService } from "./messageOwnerResolverService";
+import logger from "../utils/logger";
 
 // UTC calendar day, matching the day-level granularity buildSeries/dedup key
 // off — a message qualifies for at most one FRESH/REPLIED instance ever, but
@@ -132,6 +134,18 @@ export class MessageEventService {
     if (!rows.length) return;
 
     await MessageEventRepository.upsertEvents(rows);
+
+    // Fire-and-forget, in-process — does not block the response to the
+    // extension. See MessageOwnerResolverService for the resolution logic
+    // and the design doc for why this is in-process rather than a queue.
+    setImmediate(() => {
+      MessageOwnerResolverService.resolveAndPersist({
+        conversationKey: input.conversationKey,
+        scraperUserId: userId,
+      }).catch((err) => {
+        logger.error(`[MessageEventService] owner resolution failed for ${input.conversationKey}: ${err?.message}`);
+      });
+    });
   }
 
   /**
@@ -221,7 +235,14 @@ export class MessageEventService {
     return MessageEventRepository.getSeriesByOwnerAccount(from, to, ownerIds, opts);
   }
 
-  /** Totals over the event history for a window (no bucketing). */
+  /**
+   * Totals over the event history for a window (no bucketing).
+   *
+   * `useRawScraperId` opts out of the effective-owner (resolved HubSpot
+   * owner) filtering every report caller wants, filtering on the raw scraper
+   * user_id instead — see MessageEventRepository's SeriesFilterOpts for why
+   * this exists (only the extension popup's own daily counter needs it).
+   */
   static getTotals(
     from: Date,
     to: Date,
@@ -230,6 +251,7 @@ export class MessageEventService {
       restrictUserIds?: string[];
       selfLinkedinId?: string;
       selfLinkedinIds?: string[];
+      useRawScraperId?: boolean;
     } = {},
   ): Promise<{
     fresh: number;
@@ -284,10 +306,12 @@ export class MessageEventService {
       selfLinkedinIds: params.selfLinkedinIds,
     });
 
-    // Dedupe to one row per (kind, conversation, day) — keep the latest.
+    // Dedupe to one row per (kind, EFFECTIVE OWNER, conversation, day) — keep
+    // the latest. Grouped by displayOwnerId (not the scraper userId) so the
+    // table's owner grouping matches what the chart bucketed on.
     const byKey = new Map<string, QualifyingEventRow>();
     for (const r of rows) {
-      const key = `${r.kind}::${r.userId}::${r.conversationKey}::${truncDayUTC(r.occurredAt)}`;
+      const key = `${r.kind}::${r.displayOwnerId}::${r.conversationKey}::${truncDayUTC(r.occurredAt)}`;
       const existing = byKey.get(key);
       if (!existing || r.occurredAt.getTime() > existing.occurredAt.getTime()) byKey.set(key, r);
     }
@@ -297,6 +321,8 @@ export class MessageEventService {
     const total = rows_.length;
     const page_ = rows_.slice((page - 1) * limit, (page - 1) * limit + limit);
 
+    // MessageActivity is keyed by the SCRAPER's userId, not the effective
+    // owner — the join must use r.userId here, never r.displayOwnerId.
     const pairs = Array.from(new Map(page_.map(r => [`${r.userId}:${r.conversationKey}`, r])).values());
     const activities = await MessageEventRepository.findActivityIdentities(pairs);
     const byIdKey = new Map(activities.map(a => [`${a.userId}:${a.conversationKey}`, a]));
@@ -304,7 +330,7 @@ export class MessageEventService {
     const data = page_.map(r => {
       const activity = byIdKey.get(`${r.userId}:${r.conversationKey}`);
       return {
-        userId: r.userId,
+        userId: r.displayOwnerId,
         conversationKey: r.conversationKey,
         occurredAt: r.occurredAt,
         kind: r.kind,

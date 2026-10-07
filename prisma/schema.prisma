@@ -26,7 +26,9 @@ model User {
   connectionRequests ConnectionRequest[]
   connectionEvents   ConnectionRequestEvent[]
   messageActivity    MessageActivity[]
-  messageEvents      MessageEvent[]
+  messageEvents               MessageEvent[]           @relation("MessageEventScraper")
+  resolvedOwnerMessageEvents  MessageEvent[]            @relation("MessageEventResolvedOwner")
+  resolvedOwnerConversations  ConversationOwnerCache[]
   forgottenLeadSnapshots ForgottenLeadSnapshot[]
   nextStepGapSnapshots   NextStepGapSnapshot[]
   scheduledNoTouchSnapshots ScheduledNoTouchSnapshot[]
@@ -229,7 +231,7 @@ enum MessageEventType {
 model MessageEvent {
   id              String           @id @default(uuid())
   userId          String           @map("user_id")
-  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user            User             @relation("MessageEventScraper", fields: [userId], references: [id], onDelete: Cascade)
   conversationKey String           @map("conversation_key")
   // Stable per-message id derived on the client: `${deliveredAt}:${senderId}`.
   messageId       String           @map("message_id")
@@ -268,14 +270,38 @@ model MessageEvent {
   // derivation would ever see a WORSE value than an earlier one that missed
   // it (e.g. a transient DOM read), so filling a null is always safe.
   text            String?
+  // Who the message should actually be credited to — the LinkedIn contact's
+  // HubSpot owner, reverse-mapped to a Techeniac User via User.hubspotOwnerId.
+  // Resolved asynchronously (see MessageOwnerResolverService) after the row
+  // is written, so this starts out null and gets filled in shortly after.
+  // Distinct from `userId` (which scraper's session ingested the row, never
+  // changes) — every report query that groups/filters/displays "owner" must
+  // read COALESCE(resolvedOwnerId, userId), not userId directly.
+  resolvedOwnerId String?          @map("resolved_owner_id")
+  resolvedOwner   User?            @relation("MessageEventResolvedOwner", fields: [resolvedOwnerId], references: [id], onDelete: SetNull)
+  // 'hubspot' once resolvedOwnerId was found via a real HubSpot owner lookup;
+  // 'fallback' when the contact's HubSpot owner couldn't be resolved (rare —
+  // see the design doc) and resolvedOwnerId is left null, so reports fall
+  // back to crediting the scraper (userId) for that row.
+  attributionSource String?        @map("attribution_source")
   createdAt       DateTime         @default(now()) @map("created_at")
 
-  @@unique([userId, conversationKey, messageId])
+  @@unique([conversationKey, messageId])
   @@index([userId, occurredAt])
   @@index([type, occurredAt])
   @@index([userId, type, occurredAt])
-  // Powers the Missed Follow-Up report's "last event per conversation" query
-  // (DISTINCT ON (user_id, conversation_key) ... ORDER BY occurred_at DESC).
+  // NOTE: this plain user_id-prefixed index does NOT support the Missed
+  // Follow-Up report's "last event per conversation" query — that query
+  // groups/orders by the EFFECTIVE owner, COALESCE(resolved_owner_id,
+  // user_id), not raw user_id (see MissedFollowUpRepository.
+  // findLastEventPerConversation). The expression indexes that actually
+  // support it —
+  //   message_events_effective_owner_occurred_at_idx
+  //   message_events_effective_owner_conv_occurred_at_idx
+  // — are hand-authored SQL (prisma/migrations/20260902000000_add_message_
+  // event_effective_owner_indexes) since Prisma's schema DSL can't express
+  // expression indexes; they won't appear here as an @@index. This
+  // user_id-prefixed index is kept for other userId-scoped lookups.
   @@index([userId, conversationKey, occurredAt])
   // Powers the resolved-late deadline-crossing query, filtered by respondsToAt
   // (not occurredAt — a resolution can be arbitrarily far after its trigger,
@@ -366,6 +392,48 @@ model ScheduledNoTouchSnapshot {
   @@unique([userId, snapshotDate])
   @@index([snapshotDate])
   @@map("scheduled_no_touch_snapshots")
+}
+
+// Caches, per conversation, which Techeniac user the conversation's HubSpot
+// contact is actually owned by — resolved once via HubSpot's API and reused
+// for every future message in that conversation (HubSpot is rate-limited;
+// this avoids a lookup per message). Keyed by conversationKey alone (not
+// per scraper) because a conversation has exactly one real-world owner
+// regardless of how many different Techeniac logins have scraped it.
+// See MessageOwnerResolverService for how this gets populated and how it
+// relates to MessageEvent.resolvedOwnerId (the same value, denormalized
+// onto every event row so report queries don't need to join this table).
+model ConversationOwnerCache {
+  conversationKey   String   @id @map("conversation_key")
+  resolvedOwnerId   String?  @map("resolved_owner_id")
+  resolvedOwner     User?    @relation(fields: [resolvedOwnerId], references: [id], onDelete: SetNull)
+  // 'hubspot' | 'fallback' — see MessageEvent.attributionSource above.
+  attributionSource String   @map("attribution_source")
+  resolvedAt        DateTime @default(now()) @map("resolved_at")
+
+  @@map("conversation_owner_cache")
+}
+
+// Append-only audit trail for manual owner overrides (see
+// docs/superpowers/specs/2026-10-07-hubspot-owner-attribution-name-match-design.md).
+// Insert-only — a conversation_owner_cache upsert alone would silently lose
+// who performed a PRIOR override once a later one overwrites it.
+// performedByEmail is a plain string (the trusted x-requester-email header),
+// not a User FK: the human performing the override may not be a row in this
+// service's own User table (see the design doc's auth-model correction).
+// newOwnerId/oldOwnerId are plain strings too, not User FKs, for the same
+// reason the FK on this table is deliberately omitted — this table only
+// ever needs to record what happened, not enforce it.
+model OwnerOverrideAudit {
+  id               String   @id @default(uuid())
+  conversationKey  String   @map("conversation_key")
+  oldOwnerId       String?  @map("old_owner_id")
+  newOwnerId       String   @map("new_owner_id")
+  performedByEmail String   @map("performed_by_email")
+  performedAt      DateTime @default(now()) @map("performed_at")
+
+  @@index([conversationKey])
+  @@map("owner_override_audit")
 }
 
 // Hashed, rotating refresh tokens for user sessions (7-day TTL).

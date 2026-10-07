@@ -29,17 +29,37 @@ type SeriesFilterOpts = {
   restrictUserIds?: string[];
   selfLinkedinId?: string;
   selfLinkedinIds?: string[];
+  // Opt-out of the effective-owner (COALESCE(resolved_owner_id, user_id))
+  // filtering every report endpoint wants, in favor of the raw scraper
+  // user_id. Exists ONLY for GET /api/messages/stats/today (the extension
+  // popup's own daily counter) — that endpoint means "what did I, this
+  // browser session, do today," which must NOT shift as HubSpot resolution
+  // completes asynchronously (it can even flip AWAY from the caller mid-day).
+  // Every report call site should leave this unset/false and get the
+  // COALESCE behavior.
+  useRawScraperId?: boolean;
 };
 
 const bucketOf = (granularity?: "day" | "week" | "month") =>
   granularity === "week" ? "week" : granularity === "month" ? "month" : "day";
 
-const ownerFilterSql = (opts: Pick<SeriesFilterOpts, "userId" | "restrictUserIds">) =>
-  opts.userId
-    ? Prisma.sql`AND user_id = ${opts.userId}`
+// Shared owner-filter fragment for getSeries/getTotals/findQualifyingEvents.
+// Defaults to filtering on the EFFECTIVE owner — COALESCE(resolved_owner_id,
+// user_id) — since that's what every report endpoint (Messages, Late
+// Responses, Follow-up Tracking) wants: credit the resolved HubSpot owner,
+// falling back to the scraper only when resolution hasn't happened/succeeded.
+// Pass useRawScraperId: true to filter on the plain user_id instead — the
+// one legitimate case is the extension popup's own "what did I do today"
+// counter (see SeriesFilterOpts.useRawScraperId above), which must reflect
+// the calling scraper's own activity, not who it ended up credited to.
+const ownerFilterSql = (opts: Pick<SeriesFilterOpts, "userId" | "restrictUserIds" | "useRawScraperId">) => {
+  const column = opts.useRawScraperId ? Prisma.sql`user_id` : Prisma.sql`COALESCE(resolved_owner_id, user_id)`;
+  return opts.userId
+    ? Prisma.sql`AND ${column} = ${opts.userId}`
     : opts.restrictUserIds
-      ? Prisma.sql`AND user_id = ANY(${opts.restrictUserIds})`
+      ? Prisma.sql`AND ${column} = ANY(${opts.restrictUserIds})`
       : Prisma.empty;
+};
 
 const accountFilterSql = (opts: Pick<SeriesFilterOpts, "selfLinkedinId" | "selfLinkedinIds">) =>
   opts.selfLinkedinIds?.length
@@ -48,8 +68,24 @@ const accountFilterSql = (opts: Pick<SeriesFilterOpts, "selfLinkedinId" | "selfL
       ? Prisma.sql`AND self_linkedin_id = ${opts.selfLinkedinId}`
       : Prisma.empty;
 
+// Every report query must exclude 'ambiguous' rows (Goal 2 of the design
+// doc: an unresolved conversation is excluded from reports, not miscredited
+// to the scraper) — but NOT the useRawScraperId popup counter (GET
+// /api/messages/stats/today), which isn't one of the three reports and must
+// keep reflecting the calling scraper's own raw activity regardless of
+// resolution state. IS DISTINCT FROM (not != ) so a NULL attribution_source
+// (not yet resolved) still passes through, same as every other row.
+const AMBIGUOUS_EXCLUSION = Prisma.sql`AND attribution_source IS DISTINCT FROM 'ambiguous'`;
+const ambiguousFilterSql = (opts: Pick<SeriesFilterOpts, "useRawScraperId">) =>
+  opts.useRawScraperId ? Prisma.empty : AMBIGUOUS_EXCLUSION;
+
 export interface QualifyingEventRow {
+  // The scraper who recorded this event — used ONLY to join back to
+  // MessageActivity for participant/self display-name resolution.
   userId: string;
+  // The effective owner (resolved HubSpot owner, or the scraper as
+  // fallback) — this is what report grouping/output should use.
+  displayOwnerId: string;
   conversationKey: string;
   occurredAt: Date;
   participantLinkedinId: string | null;
@@ -86,7 +122,7 @@ export class MessageEventRepository {
             ${r.isFirstTouch}, ${r.isFollowUp}, ${r.isFirstReply}, ${r.respondsToAt},
             ${r.selfTimeZone}, ${r.participantLinkedinId}, ${r.selfLinkedinId}, ${r.text}, NOW()
           )
-          ON CONFLICT (user_id, conversation_key, message_id) DO UPDATE SET
+          ON CONFLICT (conversation_key, message_id) DO UPDATE SET
             is_first_touch = message_events.is_first_touch AND EXCLUDED.is_first_touch,
             is_first_reply = message_events.is_first_reply AND EXCLUDED.is_first_reply,
             is_follow_up   = message_events.is_follow_up   OR  EXCLUDED.is_follow_up,
@@ -103,6 +139,23 @@ export class MessageEventRepository {
   }
 
   /**
+   * Stamps the resolved owner (see MessageOwnerResolverService) onto every
+   * message_events row for this conversation — all of them, not just the
+   * newest, so a conversation's whole history reports under the same owner
+   * once resolved.
+   */
+  static async updateResolvedOwner(
+    conversationKey: string,
+    resolvedOwnerId: string | null,
+    attributionSource: "hubspot" | "fallback" | "ambiguous" | "manual",
+  ): Promise<void> {
+    await prisma.messageEvent.updateMany({
+      where: { conversationKey },
+      data: { resolvedOwnerId, attributionSource },
+    });
+  }
+
+  /**
    * Per-bucket counts over the event history — see MessageEventService.getSeries.
    * Counts DISTINCT conversations (people), not raw message events: 3 replies
    * from the same person in one day count once, not 3 times — matches how the
@@ -116,6 +169,7 @@ export class MessageEventRepository {
     const bucket = bucketOf(opts.granularity);
     const ownerFilter = ownerFilterSql(opts);
     const accountFilter = accountFilterSql(opts);
+    const ambiguousFilter = ambiguousFilterSql(opts);
 
     return prisma.$queryRaw`
       SELECT to_char(date_trunc(${bucket}, occurred_at), 'YYYY-MM-DD') AS date,
@@ -128,6 +182,7 @@ export class MessageEventRepository {
       WHERE occurred_at >= ${from} AND occurred_at <= ${to}
         ${ownerFilter}
         ${accountFilter}
+        ${ambiguousFilter}
       GROUP BY 1
       ORDER BY 1
     `;
@@ -145,7 +200,7 @@ export class MessageEventRepository {
 
     return prisma.$queryRaw`
       SELECT to_char(date_trunc(${bucket}, occurred_at), 'YYYY-MM-DD') AS date,
-             user_id AS "userId",
+             COALESCE(resolved_owner_id, user_id) AS "userId",
              COUNT(DISTINCT conversation_key) FILTER (WHERE type = 'SENT' AND is_first_touch)::int  AS fresh,
              COUNT(DISTINCT conversation_key) FILTER (WHERE type = 'SENT' AND is_follow_up)::int   AS followups,
              COUNT(DISTINCT conversation_key) FILTER (WHERE type = 'SENT')::int                   AS sent,
@@ -153,9 +208,10 @@ export class MessageEventRepository {
              COUNT(DISTINCT conversation_key) FILTER (WHERE type = 'RECEIVED' AND is_first_reply)::int AS replied
       FROM message_events
       WHERE occurred_at >= ${from} AND occurred_at <= ${to}
-        AND user_id = ANY(${ownerIds})
+        AND COALESCE(resolved_owner_id, user_id) = ANY(${ownerIds})
+        AND attribution_source IS DISTINCT FROM 'ambiguous'
         ${accountFilter}
-      GROUP BY 1, user_id
+      GROUP BY 1, COALESCE(resolved_owner_id, user_id)
       ORDER BY 1
     `;
   }
@@ -190,7 +246,7 @@ export class MessageEventRepository {
 
     return prisma.$queryRaw`
       SELECT to_char(date_trunc(${bucket}, occurred_at), 'YYYY-MM-DD') AS date,
-             user_id AS "userId",
+             COALESCE(resolved_owner_id, user_id) AS "userId",
              self_linkedin_id AS "accountId",
              COUNT(DISTINCT conversation_key) FILTER (WHERE type = 'SENT' AND is_first_touch)::int  AS fresh,
              COUNT(DISTINCT conversation_key) FILTER (WHERE type = 'SENT' AND is_follow_up)::int   AS followups,
@@ -199,9 +255,10 @@ export class MessageEventRepository {
              COUNT(DISTINCT conversation_key) FILTER (WHERE type = 'RECEIVED' AND is_first_reply)::int AS replied
       FROM message_events
       WHERE occurred_at >= ${from} AND occurred_at <= ${to}
-        AND user_id = ANY(${ownerIds})
+        AND COALESCE(resolved_owner_id, user_id) = ANY(${ownerIds})
+        AND attribution_source IS DISTINCT FROM 'ambiguous'
         ${accountFilter}
-      GROUP BY 1, user_id, self_linkedin_id
+      GROUP BY 1, COALESCE(resolved_owner_id, user_id), self_linkedin_id
       ORDER BY 1
     `;
   }
@@ -217,6 +274,7 @@ export class MessageEventRepository {
   ): Promise<{ fresh: number; followups: number; sent: number; received: number; replied: number }> {
     const ownerFilter = ownerFilterSql(opts);
     const accountFilter = accountFilterSql(opts);
+    const ambiguousFilter = ambiguousFilterSql(opts);
 
     const rows = await prisma.$queryRaw<
       Array<{ fresh: number; followups: number; sent: number; received: number; replied: number }>
@@ -230,6 +288,7 @@ export class MessageEventRepository {
       WHERE occurred_at >= ${from} AND occurred_at <= ${to}
         ${ownerFilter}
         ${accountFilter}
+        ${ambiguousFilter}
     `;
     const r = rows[0];
     return {
@@ -252,10 +311,12 @@ export class MessageEventRepository {
   static async findQualifyingEvents(from: Date, to: Date, opts: SeriesFilterOpts): Promise<QualifyingEventRow[]> {
     const ownerFilter = ownerFilterSql(opts);
     const accountFilter = accountFilterSql(opts);
+    const ambiguousFilter = ambiguousFilterSql(opts);
 
     const rows = await prisma.$queryRaw<
       Array<{
         user_id: string;
+        display_owner_id: string;
         conversation_key: string;
         occurred_at: Date;
         participant_linkedin_id: string | null;
@@ -263,7 +324,8 @@ export class MessageEventRepository {
         kind: "FRESH" | "FOLLOW_UP" | "REPLIED";
       }>
     >`
-      SELECT user_id, conversation_key, occurred_at,
+      SELECT user_id, COALESCE(resolved_owner_id, user_id) AS display_owner_id,
+             conversation_key, occurred_at,
              participant_linkedin_id, self_linkedin_id,
              CASE
                WHEN type = 'SENT' AND is_first_touch THEN 'FRESH'
@@ -279,10 +341,12 @@ export class MessageEventRepository {
       AND occurred_at >= ${from} AND occurred_at <= ${to}
       ${ownerFilter}
       ${accountFilter}
+      ${ambiguousFilter}
     `;
 
     return rows.map(r => ({
       userId: r.user_id,
+      displayOwnerId: r.display_owner_id,
       conversationKey: r.conversation_key,
       occurredAt: r.occurred_at,
       participantLinkedinId: r.participant_linkedin_id,

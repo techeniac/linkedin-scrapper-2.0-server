@@ -9,7 +9,10 @@ import prisma from "../config/prisma";
 import { LATE_FOLLOWUP_THRESHOLD_DAYS } from "../config/env";
 
 export interface ReplyCandidateRow {
+  // Effective owner (resolved HubSpot owner, or the scraper as fallback).
   userId: string;
+  // Raw scraper id — used ONLY to join back to MessageActivity.
+  scraperUserId: string;
   conversationKey: string;
   occurredAt: Date;
   respondsToAt: Date | null;
@@ -21,6 +24,7 @@ export interface ReplyCandidateRow {
 
 export interface FollowUpRow {
   userId: string;
+  scraperUserId: string;
   conversationKey: string;
   occurredAt: Date;
   respondsToAt: Date;
@@ -57,35 +61,55 @@ export class LateMessageRepository {
    * Deadline filtering happens in the service (quiet-hours math isn't
    * expressible as a single SQL predicate — see LateMessageService).
    */
-  static findSentReplyCandidates(from: Date, to: Date, opts: QueryOpts): Promise<ReplyCandidateRow[]> {
-    return prisma.messageEvent.findMany({
-      where: {
-        type: "SENT",
-        isFollowUp: false,
-        respondsToAt: { not: null },
-        occurredAt: { gte: from, lte: to },
-        ...(opts.userId
-          ? { userId: opts.userId }
-          : opts.restrictUserIds
-            ? { userId: { in: opts.restrictUserIds } }
-            : {}),
-        ...(opts.selfLinkedinIds?.length
-          ? { selfLinkedinId: { in: opts.selfLinkedinIds } }
-          : opts.selfLinkedinId
-            ? { selfLinkedinId: opts.selfLinkedinId }
-            : {}),
-      },
-      select: {
-        userId: true,
-        conversationKey: true,
-        occurredAt: true,
-        respondsToAt: true,
-        selfTimeZone: true,
-        isFollowUp: true,
-        participantLinkedinId: true,
-        selfLinkedinId: true,
-      },
-    });
+  static async findSentReplyCandidates(from: Date, to: Date, opts: QueryOpts): Promise<ReplyCandidateRow[]> {
+    const ownerFilter = opts.userId
+      ? Prisma.sql`AND COALESCE(resolved_owner_id, user_id) = ${opts.userId}`
+      : opts.restrictUserIds
+        ? Prisma.sql`AND COALESCE(resolved_owner_id, user_id) = ANY(${opts.restrictUserIds})`
+        : Prisma.empty;
+    const accountFilter = opts.selfLinkedinIds?.length
+      ? Prisma.sql`AND self_linkedin_id = ANY(${opts.selfLinkedinIds})`
+      : opts.selfLinkedinId
+        ? Prisma.sql`AND self_linkedin_id = ${opts.selfLinkedinId}`
+        : Prisma.empty;
+
+    const rows = await prisma.$queryRaw<
+      Array<{
+        user_id: string;
+        display_owner_id: string;
+        conversation_key: string;
+        occurred_at: Date;
+        responds_to_at: Date | null;
+        self_time_zone: string | null;
+        is_follow_up: boolean;
+        participant_linkedin_id: string | null;
+        self_linkedin_id: string | null;
+      }>
+    >`
+      SELECT user_id, COALESCE(resolved_owner_id, user_id) AS display_owner_id,
+             conversation_key, occurred_at, responds_to_at, self_time_zone,
+             is_follow_up, participant_linkedin_id, self_linkedin_id
+      FROM message_events
+      WHERE type = 'SENT'
+        AND is_follow_up = false
+        AND responds_to_at IS NOT NULL
+        AND occurred_at >= ${from} AND occurred_at <= ${to}
+        AND attribution_source IS DISTINCT FROM 'ambiguous'
+        ${ownerFilter}
+        ${accountFilter}
+    `;
+
+    return rows.map(r => ({
+      userId: r.display_owner_id,
+      scraperUserId: r.user_id,
+      conversationKey: r.conversation_key,
+      occurredAt: r.occurred_at,
+      respondsToAt: r.responds_to_at,
+      selfTimeZone: r.self_time_zone,
+      isFollowUp: r.is_follow_up,
+      participantLinkedinId: r.participant_linkedin_id,
+      selfLinkedinId: r.self_linkedin_id,
+    }));
   }
 
   /**
@@ -96,9 +120,9 @@ export class LateMessageRepository {
    */
   static async queryLateFollowUps(bound: FollowUpDateBound, opts: QueryOpts): Promise<FollowUpRow[]> {
     const ownerFilter = opts.userId
-      ? Prisma.sql`AND user_id = ${opts.userId}`
+      ? Prisma.sql`AND COALESCE(resolved_owner_id, user_id) = ${opts.userId}`
       : opts.restrictUserIds
-        ? Prisma.sql`AND user_id = ANY(${opts.restrictUserIds})`
+        ? Prisma.sql`AND COALESCE(resolved_owner_id, user_id) = ANY(${opts.restrictUserIds})`
         : Prisma.empty;
     const accountFilter = opts.selfLinkedinIds?.length
       ? Prisma.sql`AND self_linkedin_id = ANY(${opts.selfLinkedinIds})`
@@ -115,6 +139,7 @@ export class LateMessageRepository {
     const rows = await prisma.$queryRaw<
       Array<{
         user_id: string;
+        display_owner_id: string;
         conversation_key: string;
         occurred_at: Date;
         responds_to_at: Date;
@@ -122,19 +147,22 @@ export class LateMessageRepository {
         self_linkedin_id: string | null;
       }>
     >`
-      SELECT user_id, conversation_key, occurred_at, responds_to_at,
+      SELECT user_id, COALESCE(resolved_owner_id, user_id) AS display_owner_id,
+             conversation_key, occurred_at, responds_to_at,
              participant_linkedin_id, self_linkedin_id
       FROM message_events
       WHERE is_follow_up = true
         AND responds_to_at IS NOT NULL
         AND occurred_at > responds_to_at + (${LATE_FOLLOWUP_THRESHOLD_DAYS} * INTERVAL '1 day')
+        AND attribution_source IS DISTINCT FROM 'ambiguous'
         ${boundFilter}
         ${ownerFilter}
         ${accountFilter}
     `;
 
     return rows.map(r => ({
-      userId: r.user_id,
+      userId: r.display_owner_id,
+      scraperUserId: r.user_id,
       conversationKey: r.conversation_key,
       occurredAt: r.occurred_at,
       respondsToAt: r.responds_to_at,
