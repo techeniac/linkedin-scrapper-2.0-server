@@ -290,52 +290,6 @@ export class HubSpotContactService {
     }
   }
 
-  async updateContactByUsername(
-    username: string,
-    updates: {
-      name?: string;
-      email?: string;
-      phone?: string;
-      owner?: string;
-      lifecycle?: string;
-      leadStatus?: string;
-      leadSource?: string;
-      connectedOnSource?: string;
-      company?: string;
-    },
-  ): Promise<void> {
-    const contact = await this.findContactByProfileUrl(username);
-    if (!contact) throw new Error("Contact not found in HubSpot");
-
-    const properties: Record<string, string> = {};
-
-    if (updates.name) {
-      const nameParts = updates.name.split(" ");
-      properties.firstname = nameParts[0] || "";
-      properties.lastname = nameParts.slice(1).join(" ") || "";
-    }
-    if (updates.email) properties.email = updates.email;
-    if (updates.phone) properties.phone = updates.phone;
-    if (updates.owner) properties.hubspot_owner_id = updates.owner;
-    if (updates.lifecycle) properties.lifecyclestage = updates.lifecycle;
-    if (updates.leadStatus) properties.hs_lead_status = updates.leadStatus;
-    if (updates.leadSource) properties.approach = updates.leadSource;
-    if (updates.connectedOnSource)
-      properties.contact_source = updates.connectedOnSource;
-    if (updates.company) properties.company = updates.company;
-
-    try {
-      await axios.patch(
-        `${this.baseUrl}/crm/v3/objects/contacts/${contact.id}`,
-        { properties },
-        { headers: this.headers },
-      );
-    } catch (error: any) {
-      logger.error(`[HubSpot] updateContactByUsername failed: ${error.response?.status ?? error.message}`);
-      throw new Error(`Failed to update contact: ${error.response?.data?.message ?? error.message}`);
-    }
-  }
-
   /**
    * Exact (case-insensitive, trimmed) first+last name match against HubSpot
    * contacts, searched across all owners' contacts — same scope as
@@ -394,6 +348,52 @@ export class HubSpotContactService {
         return { ownerId: null, matchCount: 0 };
       }
       throw err;
+    }
+  }
+
+  async updateContactByUsername(
+    username: string,
+    updates: {
+      name?: string;
+      email?: string;
+      phone?: string;
+      owner?: string;
+      lifecycle?: string;
+      leadStatus?: string;
+      leadSource?: string;
+      connectedOnSource?: string;
+      company?: string;
+    },
+  ): Promise<void> {
+    const contact = await this.findContactByProfileUrl(username);
+    if (!contact) throw new Error("Contact not found in HubSpot");
+
+    const properties: Record<string, string> = {};
+
+    if (updates.name) {
+      const nameParts = updates.name.split(" ");
+      properties.firstname = nameParts[0] || "";
+      properties.lastname = nameParts.slice(1).join(" ") || "";
+    }
+    if (updates.email) properties.email = updates.email;
+    if (updates.phone) properties.phone = updates.phone;
+    if (updates.owner) properties.hubspot_owner_id = updates.owner;
+    if (updates.lifecycle) properties.lifecyclestage = updates.lifecycle;
+    if (updates.leadStatus) properties.hs_lead_status = updates.leadStatus;
+    if (updates.leadSource) properties.approach = updates.leadSource;
+    if (updates.connectedOnSource)
+      properties.contact_source = updates.connectedOnSource;
+    if (updates.company) properties.company = updates.company;
+
+    try {
+      await axios.patch(
+        `${this.baseUrl}/crm/v3/objects/contacts/${contact.id}`,
+        { properties },
+        { headers: this.headers },
+      );
+    } catch (error: any) {
+      logger.error(`[HubSpot] updateContactByUsername failed: ${error.response?.status ?? error.message}`);
+      throw new Error(`Failed to update contact: ${error.response?.data?.message ?? error.message}`);
     }
   }
 
