@@ -3,6 +3,7 @@ import rateLimit from "express-rate-limit";
 import { AuthRequest } from "../types";
 import { RATE_LIMIT_WINDOW, RATE_LIMIT_MAX } from "../config/env";
 import { createRateLimitStore } from "../config/rateLimitStore";
+import { RequesterRequest } from "./requesterContext";
 
 // Window is shared by all limiters and driven by env (minutes -> ms).
 const WINDOW_MS = RATE_LIMIT_WINDOW * 60 * 1000;
@@ -86,4 +87,19 @@ export const userAwareLimiter = rateLimit({
   max: 80,
   keyGenerator: (req: AuthRequest) => req.user?.id ?? ipKey(req.ip),
   message: "Too many requests for this user, please slow down",
+});
+
+/**
+ * Per-requester limiter for the owner-override write endpoint. Keyed by
+ * x-requester-email (set by requireRequesterContext — mount this limiter
+ * AFTER that middleware) rather than req.user, since this router has no
+ * JWT-authenticated user. Deliberately tighter than userAwareLimiter: this
+ * is a low-volume manual-correction action, not a regular polling endpoint.
+ */
+export const overrideWriteLimiter = rateLimit({
+  ...shared,
+  store: createRateLimitStore("rl:owner-override:"),
+  max: 30,
+  keyGenerator: (req: RequesterRequest) => req.requesterEmail ?? ipKey(req.ip),
+  message: "Too many owner-override attempts, please slow down",
 });
