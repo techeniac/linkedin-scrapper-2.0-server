@@ -55,11 +55,6 @@ export class OwnerOverrideService {
     requesterEmail: string;
     scope: RequesterScope;
   }): Promise<void> {
-    const connectedIds = await getConnectedOwnerIds();
-    if (!connectedIds.includes(params.newOwnerId)) {
-      throw new ValidationError("ownerId must be a HubSpot-connected owner");
-    }
-
     if (params.scope === "regular") {
       const scraperUserId = await this.resolveScraperUserId(params.requesterEmail);
       const isScraper = scraperUserId
@@ -68,6 +63,11 @@ export class OwnerOverrideService {
       if (!isScraper) {
         throw new ForbiddenError("Not authorized to override this conversation");
       }
+    }
+
+    const connectedIds = await getConnectedOwnerIds();
+    if (!connectedIds.includes(params.newOwnerId)) {
+      throw new ValidationError("ownerId must be a HubSpot-connected owner");
     }
 
     const cached = await OwnerOverrideRepository.findCachedOwner(params.conversationKey);
