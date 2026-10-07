@@ -6,9 +6,8 @@
 // repository's atomic write. See the design doc's Auth section for why
 // x-requester-email is trusted fully once requirePublicApiKey has passed,
 // and why there is no local admin allowlist here.
-import prisma from "../config/prisma";
 import { OwnerOverrideRepository } from "../repositories/ownerOverrideRepository";
-import { getConnectedOwnerIds } from "./hubspotOwnersService";
+import { getConnectedOwnerIds, getUserIdByEmail } from "./hubspotOwnersService";
 import { ValidationError, ForbiddenError } from "../errors/AppError";
 
 export type RequesterScope = "regular" | "all";
@@ -25,8 +24,7 @@ export class OwnerOverrideService {
   // just means a 'regular'-scope request from that requester can never
   // match any conversation (they've never been recorded as a scraper here).
   private static async resolveScraperUserId(requesterEmail: string): Promise<string | null> {
-    const user = await prisma.user.findUnique({ where: { email: requesterEmail }, select: { id: true } });
-    return user?.id ?? null;
+    return (await getUserIdByEmail(requesterEmail)) ?? null;
   }
 
   static async listAmbiguous(params: {

@@ -89,8 +89,12 @@ export class MessageOwnerResolverService {
     // missing name is a genuine, permanent "can't resolve, and never will
     // from this data" case — deliberately outside the try/catch below (no
     // HubSpot call is even attempted).
-    const activity = await prisma.messageActivity.findUnique({
-      where: { userId_conversationKey: { userId: scraperUserId, conversationKey } },
+    // Not scoped to scraperUserId's own activity row: multiple Techeniac
+    // users can scrape the same shared LinkedIn account, and only one of
+    // them may have captured the participant name. Any scraper's captured
+    // name for this conversationKey is usable.
+    const activity = await prisma.messageActivity.findFirst({
+      where: { conversationKey, participantName: { not: null } },
       select: { participantName: true },
     });
     const name = activity?.participantName?.trim();

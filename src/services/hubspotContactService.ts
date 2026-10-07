@@ -293,11 +293,11 @@ export class HubSpotContactService {
   /**
    * Exact (case-insensitive, trimmed) first+last name match against HubSpot
    * contacts, searched across all owners' contacts — same scope as
-   * findContactByProfileUrl. HubSpot's search filters are tokenized,
-   * so CONTAINS_TOKEN is used to fetch a candidate set, then exact equality
-   * is re-checked client-side (same two-step pattern as
-   * searchContactByUsername above) rather than trusting HubSpot's own
-   * match semantics to be exact.
+   * findContactByProfileUrl. Uses HubSpot's EQ operator (case-insensitive)
+   * on both firstname and lastname, then re-checks exact equality
+   * client-side anyway — belt-and-suspenders against any HubSpot-side case
+   * handling edge case, same two-step pattern as searchContactByUsername
+   * above.
    *
    * matchCount distinguishes the three outcomes a caller needs: 0 (no
    * contact with this name), 1 (safe to use ownerId, which may itself be
@@ -323,8 +323,8 @@ export class HubSpotContactService {
           filterGroups: [
             {
               filters: [
-                { propertyName: "firstname", operator: "CONTAINS_TOKEN", value: fn },
-                { propertyName: "lastname", operator: "CONTAINS_TOKEN", value: ln },
+                { propertyName: "firstname", operator: "EQ", value: fn },
+                { propertyName: "lastname", operator: "EQ", value: ln },
               ],
             },
           ],
@@ -341,7 +341,14 @@ export class HubSpotContactService {
         return cf === fn.toLowerCase() && cl === ln.toLowerCase();
       });
 
-      if (matches.length !== 1) return { ownerId: null, matchCount: matches.length };
+      // If HubSpot reports more total matches than this page returned, the
+      // true match count is unknown (could be 2+ exact matches split across
+      // pages) — never collapse that uncertainty down to a false matchCount
+      // of 1.
+      const total = response.data?.total ?? results.length;
+      const matchCount = total > results.length ? Math.max(matches.length, 2) : matches.length;
+
+      if (matchCount !== 1) return { ownerId: null, matchCount };
       return { ownerId: matches[0].properties?.hubspot_owner_id ?? null, matchCount: 1 };
     } catch (err: any) {
       if (err.response?.status === 404 || err.response?.status === 400) {
