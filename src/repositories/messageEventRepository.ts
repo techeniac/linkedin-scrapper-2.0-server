@@ -136,7 +136,7 @@ export class MessageEventRepository {
   static async updateResolvedOwner(
     conversationKey: string,
     resolvedOwnerId: string | null,
-    attributionSource: "hubspot" | "fallback",
+    attributionSource: "hubspot" | "fallback" | "ambiguous" | "manual",
   ): Promise<void> {
     await prisma.messageEvent.updateMany({
       where: { conversationKey },

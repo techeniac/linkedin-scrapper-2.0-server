@@ -23,7 +23,7 @@ export class ConversationOwnerCacheRepository {
   static async upsert(
     conversationKey: string,
     resolvedOwnerId: string | null,
-    attributionSource: "hubspot" | "fallback",
+    attributionSource: "hubspot" | "fallback" | "ambiguous" | "manual",
   ): Promise<void> {
     await prisma.conversationOwnerCache.upsert({
       where: { conversationKey },
