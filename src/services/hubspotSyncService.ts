@@ -40,6 +40,10 @@ export class HubSpotSyncService {
     return this.contactService.findContactByProfileUrl(username);
   }
 
+  findContactOwnerIdByName(firstName: string, lastName: string) {
+    return this.contactService.findContactOwnerIdByName(firstName, lastName);
+  }
+
   updateContactByUsername(username: string, updates: Parameters<HubSpotContactService["updateContactByUsername"]>[1]) {
     return this.contactService.updateContactByUsername(username, updates);
   }
