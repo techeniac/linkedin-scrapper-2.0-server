@@ -77,7 +77,7 @@ export class MissedFollowUpRepository {
         conversation_key, type, occurred_at,
         participant_linkedin_id, self_linkedin_id
       FROM message_events
-      WHERE true ${ownerFilter} ${accountFilter}
+      WHERE attribution_source IS DISTINCT FROM 'ambiguous' ${ownerFilter} ${accountFilter}
       ORDER BY COALESCE(resolved_owner_id, user_id), conversation_key, occurred_at DESC, (type = 'RECEIVED') DESC
     `;
 

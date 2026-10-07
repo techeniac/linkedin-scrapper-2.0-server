@@ -68,6 +68,17 @@ const accountFilterSql = (opts: Pick<SeriesFilterOpts, "selfLinkedinId" | "selfL
       ? Prisma.sql`AND self_linkedin_id = ${opts.selfLinkedinId}`
       : Prisma.empty;
 
+// Every report query must exclude 'ambiguous' rows (Goal 2 of the design
+// doc: an unresolved conversation is excluded from reports, not miscredited
+// to the scraper) — but NOT the useRawScraperId popup counter (GET
+// /api/messages/stats/today), which isn't one of the three reports and must
+// keep reflecting the calling scraper's own raw activity regardless of
+// resolution state. IS DISTINCT FROM (not != ) so a NULL attribution_source
+// (not yet resolved) still passes through, same as every other row.
+const AMBIGUOUS_EXCLUSION = Prisma.sql`AND attribution_source IS DISTINCT FROM 'ambiguous'`;
+const ambiguousFilterSql = (opts: Pick<SeriesFilterOpts, "useRawScraperId">) =>
+  opts.useRawScraperId ? Prisma.empty : AMBIGUOUS_EXCLUSION;
+
 export interface QualifyingEventRow {
   // The scraper who recorded this event — used ONLY to join back to
   // MessageActivity for participant/self display-name resolution.
@@ -158,6 +169,7 @@ export class MessageEventRepository {
     const bucket = bucketOf(opts.granularity);
     const ownerFilter = ownerFilterSql(opts);
     const accountFilter = accountFilterSql(opts);
+    const ambiguousFilter = ambiguousFilterSql(opts);
 
     return prisma.$queryRaw`
       SELECT to_char(date_trunc(${bucket}, occurred_at), 'YYYY-MM-DD') AS date,
@@ -170,6 +182,7 @@ export class MessageEventRepository {
       WHERE occurred_at >= ${from} AND occurred_at <= ${to}
         ${ownerFilter}
         ${accountFilter}
+        ${ambiguousFilter}
       GROUP BY 1
       ORDER BY 1
     `;
@@ -196,6 +209,7 @@ export class MessageEventRepository {
       FROM message_events
       WHERE occurred_at >= ${from} AND occurred_at <= ${to}
         AND COALESCE(resolved_owner_id, user_id) = ANY(${ownerIds})
+        AND attribution_source IS DISTINCT FROM 'ambiguous'
         ${accountFilter}
       GROUP BY 1, COALESCE(resolved_owner_id, user_id)
       ORDER BY 1
@@ -242,6 +256,7 @@ export class MessageEventRepository {
       FROM message_events
       WHERE occurred_at >= ${from} AND occurred_at <= ${to}
         AND COALESCE(resolved_owner_id, user_id) = ANY(${ownerIds})
+        AND attribution_source IS DISTINCT FROM 'ambiguous'
         ${accountFilter}
       GROUP BY 1, COALESCE(resolved_owner_id, user_id), self_linkedin_id
       ORDER BY 1
@@ -259,6 +274,7 @@ export class MessageEventRepository {
   ): Promise<{ fresh: number; followups: number; sent: number; received: number; replied: number }> {
     const ownerFilter = ownerFilterSql(opts);
     const accountFilter = accountFilterSql(opts);
+    const ambiguousFilter = ambiguousFilterSql(opts);
 
     const rows = await prisma.$queryRaw<
       Array<{ fresh: number; followups: number; sent: number; received: number; replied: number }>
@@ -272,6 +288,7 @@ export class MessageEventRepository {
       WHERE occurred_at >= ${from} AND occurred_at <= ${to}
         ${ownerFilter}
         ${accountFilter}
+        ${ambiguousFilter}
     `;
     const r = rows[0];
     return {
@@ -294,6 +311,7 @@ export class MessageEventRepository {
   static async findQualifyingEvents(from: Date, to: Date, opts: SeriesFilterOpts): Promise<QualifyingEventRow[]> {
     const ownerFilter = ownerFilterSql(opts);
     const accountFilter = accountFilterSql(opts);
+    const ambiguousFilter = ambiguousFilterSql(opts);
 
     const rows = await prisma.$queryRaw<
       Array<{
@@ -323,6 +341,7 @@ export class MessageEventRepository {
       AND occurred_at >= ${from} AND occurred_at <= ${to}
       ${ownerFilter}
       ${accountFilter}
+      ${ambiguousFilter}
     `;
 
     return rows.map(r => ({

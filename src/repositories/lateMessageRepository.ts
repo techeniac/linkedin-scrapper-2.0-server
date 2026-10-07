@@ -94,6 +94,7 @@ export class LateMessageRepository {
         AND is_follow_up = false
         AND responds_to_at IS NOT NULL
         AND occurred_at >= ${from} AND occurred_at <= ${to}
+        AND attribution_source IS DISTINCT FROM 'ambiguous'
         ${ownerFilter}
         ${accountFilter}
     `;
@@ -153,6 +154,7 @@ export class LateMessageRepository {
       WHERE is_follow_up = true
         AND responds_to_at IS NOT NULL
         AND occurred_at > responds_to_at + (${LATE_FOLLOWUP_THRESHOLD_DAYS} * INTERVAL '1 day')
+        AND attribution_source IS DISTINCT FROM 'ambiguous'
         ${boundFilter}
         ${ownerFilter}
         ${accountFilter}
