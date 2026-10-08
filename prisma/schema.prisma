@@ -407,8 +407,13 @@ model ConversationOwnerCache {
   conversationKey   String   @id @map("conversation_key")
   resolvedOwnerId   String?  @map("resolved_owner_id")
   resolvedOwner     User?    @relation(fields: [resolvedOwnerId], references: [id], onDelete: SetNull)
-  // 'hubspot' | 'fallback' — see MessageEvent.attributionSource above.
+  // 'hubspot' | 'fallback' | 'ambiguous' | 'manual' — see MessageEvent.attributionSource above.
   attributionSource String   @map("attribution_source")
+  // Set only when attributionSource is 'ambiguous' — one of the 5 codes in
+  // MessageOwnerResolverService.AmbiguousReason. NULL on every non-ambiguous
+  // row, and permanently NULL on rows resolved before this column existed
+  // (see design doc's Non-Goals — no backfill).
+  ambiguousReason   String?  @map("ambiguous_reason")
   resolvedAt        DateTime @default(now()) @map("resolved_at")
 
   @@map("conversation_owner_cache")
@@ -425,12 +430,25 @@ model ConversationOwnerCache {
 // reason the FK on this table is deliberately omitted — this table only
 // ever needs to record what happened, not enforce it.
 model OwnerOverrideAudit {
-  id               String   @id @default(uuid())
-  conversationKey  String   @map("conversation_key")
-  oldOwnerId       String?  @map("old_owner_id")
-  newOwnerId       String   @map("new_owner_id")
-  performedByEmail String   @map("performed_by_email")
-  performedAt      DateTime @default(now()) @map("performed_at")
+  id                 String   @id @default(uuid())
+  conversationKey    String   @map("conversation_key")
+  oldOwnerId         String?  @map("old_owner_id")
+  newOwnerId         String   @map("new_owner_id")
+  performedByEmail   String   @map("performed_by_email")
+  performedAt        DateTime @default(now()) @map("performed_at")
+  // Snapshot of conversation_owner_cache.ambiguous_reason immediately BEFORE
+  // this override — history, not live state (the live column gets cleared
+  // to NULL by this same override). NULL if the pre-override row had no
+  // reason recorded (pre-existing ambiguous row, or this is the first-ever
+  // override for a conversation with no ambiguous_reason set).
+  ambiguousReason    String?  @map("ambiguous_reason")
+  // Participant name in effect immediately before this override
+  // (cross-scraper lookup), regardless of whether this override changed it.
+  oldParticipantName String?  @map("old_participant_name")
+  // The name provided in THIS override's request body, or NULL if no name
+  // change was attempted — distinct from "unchanged because it matched the
+  // old value" (that case still records the provided value here).
+  newParticipantName String?  @map("new_participant_name")
 
   @@index([conversationKey])
   @@map("owner_override_audit")
