@@ -6,6 +6,16 @@ import { AmbiguousSortBy, SortOrder } from "../repositories/ownerOverrideReposit
 import { ValidationError } from "../errors/AppError";
 import { successResponse } from "../utils/apiResponse";
 
+// Deliberately a fresh, local copy of the same slug-extraction technique as
+// publicController.ts's conversationUrlFromKey — that helper is in active
+// use by 3 unrelated report endpoints and must not be touched or imported
+// cross-module for this feature (see design doc).
+const THREAD_SLUG_RE = /2-[A-Za-z0-9_=-]+/;
+const conversationUrlFromKey = (conversationKey: string): string | null => {
+  const slug = conversationKey.match(THREAD_SLUG_RE)?.[0];
+  return slug ? `https://www.linkedin.com/messaging/thread/${slug}/` : null;
+};
+
 // --- query param parsers ---
 const toStr = (v: unknown): string | undefined => {
   const s = typeof v === "string" ? v.trim() : "";
@@ -29,7 +39,10 @@ const toSortBy = (v: unknown): AmbiguousSortBy =>
 const toSortOrder = (v: unknown): SortOrder => (toStr(v) === "asc" ? "asc" : "desc");
 
 // GET /api/owner-overrides — every conversation currently needing a manual
-// resolution, scoped per requireRequesterContext's x-scope rule.
+// resolution, scoped per requireRequesterContext's x-scope rule. Each row
+// now includes ambiguousReason (one of the 5 codes, or null for pre-existing
+// rows — see design doc) and conversationUrl (null if conversationKey has no
+// recognizable LinkedIn thread slug).
 // Query params: page? (default 1), limit? (10|25|50|100, default 10),
 // sortBy? (resolvedAt|participantName, default resolvedAt),
 // sortOrder? (asc|desc, default desc), search? (matches participant name or
@@ -49,13 +62,20 @@ export const listOwnerOverrides = async (
       sortOrder: toSortOrder(req.query.sortOrder),
       search: toStr(req.query.search),
     });
-    successResponse(res, result, "Ambiguous conversations retrieved");
+    const data = result.data.map((row) => ({
+      ...row,
+      conversationUrl: conversationUrlFromKey(row.conversationKey),
+    }));
+    successResponse(res, { data, metadata: result.metadata }, "Ambiguous conversations retrieved");
   } catch (error) {
     next(error);
   }
 };
 
-// POST /api/owner-overrides/:conversationKey — body { ownerId }.
+// POST /api/owner-overrides/:conversationKey — body { ownerId, participantName? }.
+// 409 if the conversation isn't currently 'ambiguous'. 400 if participantName
+// is present but blank after trimming. Omitting participantName means no
+// name change is attempted.
 export const applyOwnerOverride = async (
   req: RequesterRequest,
   res: Response,
@@ -67,12 +87,18 @@ export const applyOwnerOverride = async (
     if (!conversationKey || !ownerId) {
       throw new ValidationError("conversationKey and ownerId are required");
     }
+    // Absent field vs. present-but-blank are different signals downstream
+    // (OwnerOverrideService.applyOverride) — pass the raw string through
+    // untrimmed so blank-after-trim can still be rejected there, and leave
+    // it undefined (not "") when the field wasn't sent at all.
+    const participantName = typeof req.body?.participantName === "string" ? req.body.participantName : undefined;
 
     await OwnerOverrideService.applyOverride({
       conversationKey,
       newOwnerId: ownerId,
       requesterEmail: req.requesterEmail!,
       scope: req.requesterScope!,
+      participantName,
     });
     successResponse(res, { conversationKey, ownerId }, "Owner override applied");
   } catch (error) {
