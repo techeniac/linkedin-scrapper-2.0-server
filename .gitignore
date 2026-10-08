@@ -1,5 +1,4 @@
 node_modules/
-.env
 logs/
 *.log
 .DS_Store
@@ -7,3 +6,4 @@ coverage/
 dist/
 build/
 .vscode.worktrees/
+config.bat
