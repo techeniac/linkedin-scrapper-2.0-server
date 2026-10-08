@@ -4,7 +4,7 @@
 // fields (see the `debug` block) so failures are diagnosable from the HTTP
 // response alone, without server log access. This is a deliberate, temporary
 // trade-off (stack traces are normally never sent to a caller) — revert once
-// log access is restored. See docs/superpowers/plans/2026-10-08-api-debug-error-responses-plan.md.
+// log access is restored.
 import { Request, Response, NextFunction } from "express";
 import logger from "../utils/logger";
 import { AppError } from "../errors/AppError";
