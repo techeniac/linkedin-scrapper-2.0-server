@@ -45,6 +45,17 @@ import { HubSpotContextService } from "./hubspotContextService";
 
 export type AttributionSource = "hubspot" | "fallback" | "ambiguous";
 
+// The 5 branches inside resolveOwnerFromHubSpot that can land on
+// source: "ambiguous" — see the design doc's table mapping each code to
+// its originating condition. Reported, not newly introduced: every branch
+// below already returned "ambiguous" before this type existed.
+export type AmbiguousReason =
+  | "NO_NAME"
+  | "SINGLE_WORD_NAME"
+  | "NO_HUBSPOT_MATCH"
+  | "MULTIPLE_HUBSPOT_MATCHES"
+  | "OWNER_NOT_CONNECTED";
+
 export interface ResolvedOwner {
   ownerId: string | null;
   source: AttributionSource;
@@ -52,6 +63,8 @@ export interface ResolvedOwner {
   // failure) rather than genuinely finding no owner — see the file header.
   // Absent/falsy for every normal result, including a real "no owner" fact.
   transient?: boolean;
+  // Set only when source is "ambiguous" — which of the 5 codes applied.
+  ambiguousReason?: AmbiguousReason;
 }
 
 export class MessageOwnerResolverService {
@@ -74,7 +87,12 @@ export class MessageOwnerResolverService {
     // forever (the cache-hit path above never re-queries HubSpot once a row
     // exists). message_events still gets stamped either way, below.
     if (!resolved.transient) {
-      await ConversationOwnerCacheRepository.upsert(params.conversationKey, resolved.ownerId, resolved.source);
+      await ConversationOwnerCacheRepository.upsert(
+        params.conversationKey,
+        resolved.ownerId,
+        resolved.source,
+        resolved.ambiguousReason,
+      );
     }
     await MessageEventRepository.updateResolvedOwner(params.conversationKey, resolved.ownerId, resolved.source);
   }
@@ -98,10 +116,11 @@ export class MessageOwnerResolverService {
       select: { participantName: true },
     });
     const name = activity?.participantName?.trim();
-    if (!name) return { ownerId: null, source: "ambiguous" };
+    if (!name) return { ownerId: null, source: "ambiguous", ambiguousReason: "NO_NAME" };
 
     const [firstName, ...rest] = name.split(" ");
     const lastName = rest.join(" ");
+    if (!lastName) return { ownerId: null, source: "ambiguous", ambiguousReason: "SINGLE_WORD_NAME" };
 
     // Only the actual HubSpot round-trip can fail transiently (scraper not
     // HubSpot-connected, rate limit, network blip) — those failures must NOT
@@ -117,10 +136,14 @@ export class MessageOwnerResolverService {
       return { ownerId: null, source: "fallback", transient: true };
     }
 
-    // 0 matches, 2+ matches, or exactly 1 match with no HubSpot owner set —
-    // no disambiguation signal exists in captured data for any of these.
-    if (match.matchCount !== 1 || !match.ownerId) {
-      return { ownerId: null, source: "ambiguous" };
+    if (match.matchCount === 0) {
+      return { ownerId: null, source: "ambiguous", ambiguousReason: "NO_HUBSPOT_MATCH" };
+    }
+    if (match.matchCount >= 2) {
+      return { ownerId: null, source: "ambiguous", ambiguousReason: "MULTIPLE_HUBSPOT_MATCHES" };
+    }
+    if (!match.ownerId) {
+      return { ownerId: null, source: "ambiguous", ambiguousReason: "OWNER_NOT_CONNECTED" };
     }
 
     const user = await prisma.user.findFirst({
@@ -130,7 +153,7 @@ export class MessageOwnerResolverService {
     // A real HubSpot owner exists but isn't a connected Techeniac user — not
     // a transient failure (HubSpot answered definitively), and not a
     // resolution either. See this plan's Global Constraints ruling.
-    if (!user) return { ownerId: null, source: "ambiguous" };
+    if (!user) return { ownerId: null, source: "ambiguous", ambiguousReason: "OWNER_NOT_CONNECTED" };
 
     return { ownerId: user.id, source: "hubspot" };
   }
