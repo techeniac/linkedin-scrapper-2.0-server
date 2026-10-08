@@ -4,58 +4,89 @@
 // design doc for the full reasoning:
 // docs/superpowers/specs/2026-10-07-hubspot-owner-attribution-name-match-design.md
 import prisma from "../config/prisma";
+import { Prisma } from "@prisma/client";
 
 export interface AmbiguousConversation {
   conversationKey: string;
   resolvedAt: Date;
+  participantName: string | null;
 }
+
+export type AmbiguousSortBy = "resolvedAt" | "participantName";
+export type SortOrder = "asc" | "desc";
+
+// conversationKey -> participant_name is looked up via a LATERAL join
+// (first non-null name from any scraper's message_activity row for that
+// conversation — see messageOwnerResolverService.ts's own cross-scraper
+// lookup for the same reasoning) directly in SQL, so search/sort/pagination
+// can all happen at the DB level instead of over an unbounded in-memory set.
+const SORT_COLUMNS: Record<AmbiguousSortBy, string> = {
+  resolvedAt: "c.resolved_at",
+  participantName: "pn.participant_name",
+};
 
 export class OwnerOverrideRepository {
   /**
-   * Every conversation currently cached as 'ambiguous'. When scraperUserId
-   * is given, narrowed to conversations where that scraper recorded at
-   * least one message_events row for the conversation — the shared-
-   * LinkedIn-account reality that any scraper who touched a conversation can
-   * resolve it (see the design doc's GET /api/owner-overrides scope rule).
+   * Paginated/filtered/sorted conversations currently cached as 'ambiguous'.
+   * When scraperUserId is given, narrowed to conversations where that
+   * scraper recorded at least one message_events row for the conversation —
+   * the shared-LinkedIn-account reality that any scraper who touched a
+   * conversation can resolve it (see the design doc's GET
+   * /api/owner-overrides scope rule).
    */
-  static async listAmbiguous(scraperUserId?: string): Promise<AmbiguousConversation[]> {
-    if (scraperUserId) {
-      return prisma.$queryRaw<AmbiguousConversation[]>`
-        SELECT c.conversation_key AS "conversationKey", c.resolved_at AS "resolvedAt"
-        FROM conversation_owner_cache c
-        WHERE c.attribution_source = 'ambiguous'
-          AND EXISTS (
-            SELECT 1 FROM message_events m
-            WHERE m.conversation_key = c.conversation_key AND m.user_id = ${scraperUserId}
-          )
-        ORDER BY c.resolved_at DESC
-      `;
-    }
-    return prisma.$queryRaw<AmbiguousConversation[]>`
-      SELECT conversation_key AS "conversationKey", resolved_at AS "resolvedAt"
-      FROM conversation_owner_cache
-      WHERE attribution_source = 'ambiguous'
-      ORDER BY resolved_at DESC
-    `;
-  }
+  static async listAmbiguous(params: {
+    scraperUserId?: string;
+    page: number;
+    limit: number;
+    sortBy: AmbiguousSortBy;
+    sortOrder: SortOrder;
+    search?: string;
+  }): Promise<{ data: AmbiguousConversation[]; total: number }> {
+    const { scraperUserId, page, limit, sortBy, sortOrder, search } = params;
+    const offset = (page - 1) * limit;
 
-  /** Participant display name for a batch of conversationKeys, best-effort
-   * (null if no message_activity row has ever captured one) — so a human
-   * resolving the needs-resolution list can identify who they're picking an
-   * owner for. */
-  static async findParticipantNames(conversationKeys: string[]): Promise<Map<string, string | null>> {
-    if (conversationKeys.length === 0) return new Map();
-    const activities = await prisma.messageActivity.findMany({
-      where: { conversationKey: { in: conversationKeys } },
-      select: { conversationKey: true, participantName: true },
-    });
-    const nameByKey = new Map<string, string | null>();
-    for (const a of activities) {
-      if (!nameByKey.has(a.conversationKey) || (!nameByKey.get(a.conversationKey) && a.participantName)) {
-        nameByKey.set(a.conversationKey, a.participantName);
-      }
-    }
-    return nameByKey;
+    const scraperFilter = scraperUserId
+      ? Prisma.sql`AND EXISTS (SELECT 1 FROM message_events m2 WHERE m2.conversation_key = c.conversation_key AND m2.user_id = ${scraperUserId})`
+      : Prisma.empty;
+    const searchFilter = search
+      ? Prisma.sql`AND (pn.participant_name ILIKE ${"%" + search + "%"} OR c.conversation_key ILIKE ${"%" + search + "%"})`
+      : Prisma.empty;
+    // Column name can't be bound as a query param — Prisma.raw here is safe
+    // only because it's drawn from the fixed SORT_COLUMNS map, never from
+    // the raw request value directly.
+    const orderClause = Prisma.raw(
+      `${SORT_COLUMNS[sortBy]} ${sortOrder === "asc" ? "ASC" : "DESC"} NULLS LAST`,
+    );
+
+    const fromAndWhere = Prisma.sql`
+      FROM conversation_owner_cache c
+      LEFT JOIN LATERAL (
+        SELECT participant_name
+        FROM message_activity m
+        WHERE m.conversation_key = c.conversation_key AND m.participant_name IS NOT NULL
+        LIMIT 1
+      ) pn ON true
+      WHERE c.attribution_source = 'ambiguous'
+        ${scraperFilter}
+        ${searchFilter}
+    `;
+
+    const [data, countRows] = await Promise.all([
+      prisma.$queryRaw<AmbiguousConversation[]>`
+        SELECT c.conversation_key AS "conversationKey",
+               c.resolved_at AS "resolvedAt",
+               pn.participant_name AS "participantName"
+        ${fromAndWhere}
+        ORDER BY ${orderClause}
+        LIMIT ${limit} OFFSET ${offset}
+      `,
+      prisma.$queryRaw<Array<{ count: number }>>`
+        SELECT COUNT(*)::int AS count
+        ${fromAndWhere}
+      `,
+    ]);
+
+    return { data, total: countRows[0]?.count ?? 0 };
   }
 
   static async findCachedOwner(conversationKey: string): Promise<{ resolvedOwnerId: string | null } | null> {
