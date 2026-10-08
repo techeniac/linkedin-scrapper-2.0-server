@@ -8,7 +8,7 @@
 // and why there is no local admin allowlist here.
 import { OwnerOverrideRepository, AmbiguousSortBy, SortOrder } from "../repositories/ownerOverrideRepository";
 import { getConnectedOwnerIds, getUserIdByEmail } from "./hubspotOwnersService";
-import { ValidationError, ForbiddenError } from "../errors/AppError";
+import { ValidationError, ForbiddenError, ConflictError } from "../errors/AppError";
 
 export type RequesterScope = "regular" | "all";
 
@@ -16,6 +16,7 @@ export interface AmbiguousConversationDTO {
   conversationKey: string;
   participantName: string | null;
   resolvedAt: Date;
+  ambiguousReason: string | null;
 }
 
 export interface AmbiguousListResult {
@@ -76,6 +77,7 @@ export class OwnerOverrideService {
     newOwnerId: string;
     requesterEmail: string;
     scope: RequesterScope;
+    participantName?: string;
   }): Promise<void> {
     if (params.scope === "regular") {
       const scraperUserId = await this.resolveScraperUserId(params.requesterEmail);
@@ -92,12 +94,31 @@ export class OwnerOverrideService {
       throw new ValidationError("ownerId must be a HubSpot-connected owner");
     }
 
+    // Present-but-blank is rejected; absent is "no name change attempted"
+    // and is left as undefined all the way through to the repository.
+    let participantName: string | undefined;
+    if (params.participantName !== undefined) {
+      const trimmed = params.participantName.trim();
+      if (!trimmed) {
+        throw new ValidationError("participantName must not be blank");
+      }
+      participantName = trimmed;
+    }
+
+    const snapshot = await OwnerOverrideRepository.getOverrideSnapshot(params.conversationKey);
+    if (snapshot.attributionSource !== "ambiguous") {
+      throw new ConflictError("Conversation is not in a resolvable state");
+    }
+
     const cached = await OwnerOverrideRepository.findCachedOwner(params.conversationKey);
     await OwnerOverrideRepository.applyOverride({
       conversationKey: params.conversationKey,
       oldOwnerId: cached?.resolvedOwnerId ?? null,
       newOwnerId: params.newOwnerId,
       performedByEmail: params.requesterEmail,
+      participantName,
+      ambiguousReason: snapshot.ambiguousReason,
+      oldParticipantName: snapshot.participantName,
     });
   }
 }
