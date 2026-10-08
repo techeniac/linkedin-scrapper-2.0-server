@@ -6,7 +6,7 @@
 // repository's atomic write. See the design doc's Auth section for why
 // x-requester-email is trusted fully once requirePublicApiKey has passed,
 // and why there is no local admin allowlist here.
-import { OwnerOverrideRepository } from "../repositories/ownerOverrideRepository";
+import { OwnerOverrideRepository, AmbiguousSortBy, SortOrder } from "../repositories/ownerOverrideRepository";
 import { getConnectedOwnerIds, getUserIdByEmail } from "./hubspotOwnersService";
 import { ValidationError, ForbiddenError } from "../errors/AppError";
 
@@ -16,6 +16,11 @@ export interface AmbiguousConversationDTO {
   conversationKey: string;
   participantName: string | null;
   resolvedAt: Date;
+}
+
+export interface AmbiguousListResult {
+  data: AmbiguousConversationDTO[];
+  metadata: { total: number; page: number; limit: number; totalPages: number };
 }
 
 export class OwnerOverrideService {
@@ -30,21 +35,40 @@ export class OwnerOverrideService {
   static async listAmbiguous(params: {
     requesterEmail: string;
     scope: RequesterScope;
-  }): Promise<AmbiguousConversationDTO[]> {
-    let rows;
-    if (params.scope === "all") {
-      rows = await OwnerOverrideRepository.listAmbiguous();
-    } else {
-      const scraperUserId = await this.resolveScraperUserId(params.requesterEmail);
-      rows = scraperUserId ? await OwnerOverrideRepository.listAmbiguous(scraperUserId) : [];
+    page: number;
+    limit: number;
+    sortBy: AmbiguousSortBy;
+    sortOrder: SortOrder;
+    search?: string;
+  }): Promise<AmbiguousListResult> {
+    let scraperUserId: string | undefined;
+    if (params.scope === "regular") {
+      scraperUserId = (await this.resolveScraperUserId(params.requesterEmail)) ?? undefined;
+      // No matching User row for this requester — never query/leak every
+      // conversation; an empty page is the correct, safe answer.
+      if (!scraperUserId) {
+        return { data: [], metadata: { total: 0, page: params.page, limit: params.limit, totalPages: 1 } };
+      }
     }
 
-    const nameByKey = await OwnerOverrideRepository.findParticipantNames(rows.map(r => r.conversationKey));
-    return rows.map(r => ({
-      conversationKey: r.conversationKey,
-      participantName: nameByKey.get(r.conversationKey) ?? null,
-      resolvedAt: r.resolvedAt,
-    }));
+    const { data, total } = await OwnerOverrideRepository.listAmbiguous({
+      scraperUserId,
+      page: params.page,
+      limit: params.limit,
+      sortBy: params.sortBy,
+      sortOrder: params.sortOrder,
+      search: params.search,
+    });
+
+    return {
+      data,
+      metadata: {
+        total,
+        page: params.page,
+        limit: params.limit,
+        totalPages: Math.max(1, Math.ceil(total / params.limit)),
+      },
+    };
   }
 
   static async applyOverride(params: {
