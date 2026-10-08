@@ -57,6 +57,23 @@ app.get("/", (req, res) => {
 // Mount API routes
 app.use("/api", routes);
 
+// DEBUG: a plain Express 404 (no matching route) would otherwise return an
+// empty/HTML body with no diagnostic info. This makes "route doesn't exist
+// on this deployment" distinguishable from other failures without server
+// log access. Revert once log access is restored — see errorHandler.ts.
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    message: "Not Found",
+    timestamp: new Date().toISOString(),
+    debug: {
+      method: req.method,
+      path: req.originalUrl,
+      reason: "No route matched this path on this deployment",
+    },
+  });
+});
+
 // Global error handler (must be last)
 app.use(errorHandler);
 
