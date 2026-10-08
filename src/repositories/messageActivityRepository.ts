@@ -64,7 +64,14 @@ export class MessageActivityRepository {
         first_message_at = LEAST(message_activity.first_message_at,   EXCLUDED.first_message_at),
         last_message_at  = GREATEST(message_activity.last_message_at, EXCLUDED.last_message_at),
         participant_linkedin_id = COALESCE(EXCLUDED.participant_linkedin_id, message_activity.participant_linkedin_id),
-        participant_name        = COALESCE(EXCLUDED.participant_name,        message_activity.participant_name),
+        -- A human-corrected name (owner-override participantNameOverridden)
+        -- is protected from this sync's own COALESCE merge — otherwise the
+        -- next sync of this conversation would silently revert the
+        -- correction back to LinkedIn's raw captured name.
+        participant_name        = CASE WHEN message_activity.participant_name_overridden
+                                     THEN message_activity.participant_name
+                                     ELSE COALESCE(EXCLUDED.participant_name, message_activity.participant_name)
+                                   END,
         participant_profile_url = COALESCE(EXCLUDED.participant_profile_url, message_activity.participant_profile_url),
         self_linkedin_id        = COALESCE(EXCLUDED.self_linkedin_id,        message_activity.self_linkedin_id),
         self_name               = COALESCE(EXCLUDED.self_name,               message_activity.self_name),

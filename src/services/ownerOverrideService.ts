@@ -8,7 +8,7 @@
 // and why there is no local admin allowlist here.
 import { OwnerOverrideRepository, AmbiguousSortBy, SortOrder } from "../repositories/ownerOverrideRepository";
 import { getConnectedOwnerIds, getUserIdByEmail } from "./hubspotOwnersService";
-import { ValidationError, ForbiddenError, ConflictError } from "../errors/AppError";
+import { ValidationError, ForbiddenError } from "../errors/AppError";
 
 export type RequesterScope = "regular" | "all";
 
@@ -105,20 +105,15 @@ export class OwnerOverrideService {
       participantName = trimmed;
     }
 
-    const snapshot = await OwnerOverrideRepository.getOverrideSnapshot(params.conversationKey);
-    if (snapshot.attributionSource !== "ambiguous") {
-      throw new ConflictError("Conversation is not in a resolvable state");
-    }
-
-    const cached = await OwnerOverrideRepository.findCachedOwner(params.conversationKey);
+    // The ambiguous-state guard (409) is enforced atomically inside
+    // OwnerOverrideRepository.applyOverride's own transaction, not here —
+    // see that method's doc comment for why a separate pre-check would be
+    // a TOCTOU race between two concurrent overrides.
     await OwnerOverrideRepository.applyOverride({
       conversationKey: params.conversationKey,
-      oldOwnerId: cached?.resolvedOwnerId ?? null,
       newOwnerId: params.newOwnerId,
       performedByEmail: params.requesterEmail,
       participantName,
-      ambiguousReason: snapshot.ambiguousReason,
-      oldParticipantName: snapshot.participantName,
     });
   }
 }

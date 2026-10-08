@@ -120,11 +120,14 @@ export class MessageOwnerResolverService {
 
     const [firstName, ...rest] = name.split(" ");
     const lastName = rest.join(" ");
-    if (!lastName) return { ownerId: null, source: "ambiguous", ambiguousReason: "SINGLE_WORD_NAME" };
 
     // Only the actual HubSpot round-trip can fail transiently (scraper not
     // HubSpot-connected, rate limit, network blip) — those failures must NOT
-    // be cached as a permanent fact. See file header.
+    // be cached as a permanent fact. See file header. A single-word name is
+    // attempted too (not skipped up front) so a disconnected scraper still
+    // gets this transient/fallback protection instead of a premature
+    // permanent cache write — the SINGLE_WORD_NAME check below runs only
+    // once the round-trip itself has either succeeded or been ruled out.
     let match: { ownerId: string | null; matchCount: number };
     try {
       const { syncService } = await HubSpotContextService.getContext(scraperUserId);
@@ -135,6 +138,13 @@ export class MessageOwnerResolverService {
       );
       return { ownerId: null, source: "fallback", transient: true };
     }
+
+    // A single-word name never had a safe HubSpot filter to narrow on (see
+    // HubSpotContactService.findContactOwnerIdByName's own short-circuit,
+    // which already returns matchCount 2 for this case without calling
+    // HubSpot) — checked explicitly here, by the name itself rather than
+    // matchCount, so it isn't conflated with a genuine MULTIPLE_HUBSPOT_MATCHES.
+    if (!lastName) return { ownerId: null, source: "ambiguous", ambiguousReason: "SINGLE_WORD_NAME" };
 
     if (match.matchCount === 0) {
       return { ownerId: null, source: "ambiguous", ambiguousReason: "NO_HUBSPOT_MATCH" };

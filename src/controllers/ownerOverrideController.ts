@@ -90,8 +90,16 @@ export const applyOwnerOverride = async (
     // Absent field vs. present-but-blank are different signals downstream
     // (OwnerOverrideService.applyOverride) — pass the raw string through
     // untrimmed so blank-after-trim can still be rejected there, and leave
-    // it undefined (not "") when the field wasn't sent at all.
-    const participantName = typeof req.body?.participantName === "string" ? req.body.participantName : undefined;
+    // it undefined (not "") when the field wasn't sent at all. A field that
+    // IS present but not a string (null, a number, an object) is rejected
+    // here rather than silently treated as absent.
+    let participantName: string | undefined;
+    if (req.body && Object.prototype.hasOwnProperty.call(req.body, "participantName")) {
+      if (typeof req.body.participantName !== "string") {
+        throw new ValidationError("participantName must be a string");
+      }
+      participantName = req.body.participantName;
+    }
 
     await OwnerOverrideService.applyOverride({
       conversationKey,

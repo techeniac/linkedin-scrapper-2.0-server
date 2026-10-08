@@ -5,6 +5,7 @@
 // docs/superpowers/specs/2026-10-07-hubspot-owner-attribution-name-match-design.md
 import prisma from "../config/prisma";
 import { Prisma } from "@prisma/client";
+import { ConflictError } from "../errors/AppError";
 
 export interface AmbiguousConversation {
   conversationKey: string;
@@ -91,13 +92,6 @@ export class OwnerOverrideRepository {
     return { data, total: countRows[0]?.count ?? 0 };
   }
 
-  static async findCachedOwner(conversationKey: string): Promise<{ resolvedOwnerId: string | null } | null> {
-    return prisma.conversationOwnerCache.findUnique({
-      where: { conversationKey },
-      select: { resolvedOwnerId: true },
-    });
-  }
-
   static async isScraperOfConversation(conversationKey: string, scraperUserId: string): Promise<boolean> {
     const row = await prisma.messageEvent.findFirst({
       where: { conversationKey, userId: scraperUserId },
@@ -107,55 +101,65 @@ export class OwnerOverrideRepository {
   }
 
   /**
-   * The "before" state for an override's audit snapshot: the conversation's
-   * current attribution_source + ambiguous_reason (to check it's actually
-   * overridable, and to snapshot the reason), plus the current cross-scraper
-   * participant name (same LATERAL-join reasoning as listAmbiguous's `pn`
-   * subquery and the resolver's own cross-scraper lookup — any scraper's
-   * captured name for this conversationKey is the "current" one).
+   * Applies a manual owner override: atomically re-checks the ambiguous-
+   * state guard and flips the cache row to 'manual' in one round trip, then
+   * re-stamps EVERY message_events row for this conversation (its full
+   * history, not just new rows — see design doc Goal 3), optionally
+   * corrects the participant name uniformly across every scraper's
+   * message_activity row, and inserts an audit row.
+   *
+   * Deliberately NOT an interactive `prisma.$transaction(async tx => ...)`:
+   * this DB sits behind a Supavisor TRANSACTION-mode pooler (see .env),
+   * which does not reliably hold one connection across the multiple
+   * round-trips an interactive transaction needs — confirmed by a
+   * `P2028 Transaction not found` failure when this was tried. The guard
+   * below is instead a single raw statement (one round trip, so the pooler
+   * is a non-issue), and the remaining writes use the array-style
+   * `$transaction([...])` the rest of this codebase already relies on.
+   *
+   * The guard is race-safe without any application-level locking: the `old`
+   * CTE's `FOR UPDATE` takes a row lock, so a second concurrent call for
+   * the same conversationKey blocks until the first's statement commits,
+   * then re-reads the now-committed row — if that row is no longer
+   * 'ambiguous', the CTE returns no rows, the UPDATE (joined FROM old)
+   * touches no rows, and the caller gets a 409 instead of a corrupted
+   * audit row built from stale "before" values. The CTE's RETURNING also
+   * hands back those "before" values in the same statement, since by the
+   * time a plain RETURNING could see them, the UPDATE would already have
+   * overwritten them.
    */
-  static async getOverrideSnapshot(
-    conversationKey: string,
-  ): Promise<{ attributionSource: string | null; ambiguousReason: string | null; participantName: string | null }> {
-    const cache = await prisma.conversationOwnerCache.findUnique({
-      where: { conversationKey },
-      select: { attributionSource: true, ambiguousReason: true },
-    });
+  static async applyOverride(params: {
+    conversationKey: string;
+    newOwnerId: string;
+    performedByEmail: string;
+    participantName?: string;
+  }): Promise<void> {
+    const { conversationKey, newOwnerId, performedByEmail, participantName } = params;
+
+    const guarded = await prisma.$queryRaw<Array<{ oldOwnerId: string | null; oldAmbiguousReason: string | null }>>`
+      WITH old AS (
+        SELECT resolved_owner_id, ambiguous_reason
+        FROM conversation_owner_cache
+        WHERE conversation_key = ${conversationKey} AND attribution_source = 'ambiguous'
+        FOR UPDATE
+      )
+      UPDATE conversation_owner_cache c
+      SET resolved_owner_id = ${newOwnerId}, attribution_source = 'manual', ambiguous_reason = NULL, resolved_at = NOW()
+      FROM old
+      WHERE c.conversation_key = ${conversationKey}
+      RETURNING old.resolved_owner_id AS "oldOwnerId", old.ambiguous_reason AS "oldAmbiguousReason"
+    `;
+    if (guarded.length === 0) {
+      throw new ConflictError("Conversation is not in a resolvable state");
+    }
+    const { oldOwnerId, oldAmbiguousReason } = guarded[0];
+
     const activity = await prisma.messageActivity.findFirst({
       where: { conversationKey, participantName: { not: null } },
       select: { participantName: true },
     });
-    return {
-      attributionSource: cache?.attributionSource ?? null,
-      ambiguousReason: cache?.ambiguousReason ?? null,
-      participantName: activity?.participantName ?? null,
-    };
-  }
 
-  /**
-   * Applies a manual owner override atomically: upserts the cache row to
-   * 'manual', re-stamps EVERY message_events row for this conversation (its
-   * full history, not just new rows — see design doc Goal 3), and inserts an
-   * audit row — all in one transaction so a crash mid-write can never leave
-   * the cache, the event rows, and the audit trail disagreeing.
-   */
-  static async applyOverride(params: {
-    conversationKey: string;
-    oldOwnerId: string | null;
-    newOwnerId: string;
-    performedByEmail: string;
-    participantName?: string;
-    ambiguousReason: string | null;
-    oldParticipantName: string | null;
-  }): Promise<void> {
-    const { conversationKey, oldOwnerId, newOwnerId, performedByEmail, participantName, ambiguousReason, oldParticipantName } =
-      params;
     await prisma.$transaction([
-      prisma.conversationOwnerCache.upsert({
-        where: { conversationKey },
-        create: { conversationKey, resolvedOwnerId: newOwnerId, attributionSource: "manual" },
-        update: { resolvedOwnerId: newOwnerId, attributionSource: "manual", ambiguousReason: null, resolvedAt: new Date() },
-      }),
       prisma.messageEvent.updateMany({
         where: { conversationKey },
         data: { resolvedOwnerId: newOwnerId, attributionSource: "manual" },
@@ -163,11 +167,15 @@ export class OwnerOverrideRepository {
       // Uniform across every scraper's row for this conversationKey — see
       // design doc Goal 3 / Review Focus item 4. Only run when a name was
       // actually provided; omitted-field means no name change.
+      // participantNameOverridden protects this value from the scraper
+      // sync's own COALESCE-based merge (messageActivityRepository.upsert) —
+      // without it, the next sync of this conversation silently reverts the
+      // correction back to LinkedIn's raw captured name.
       ...(participantName
         ? [
             prisma.messageActivity.updateMany({
               where: { conversationKey },
-              data: { participantName },
+              data: { participantName, participantNameOverridden: true },
             }),
           ]
         : []),
@@ -177,8 +185,8 @@ export class OwnerOverrideRepository {
           oldOwnerId,
           newOwnerId,
           performedByEmail,
-          ambiguousReason,
-          oldParticipantName,
+          ambiguousReason: oldAmbiguousReason,
+          oldParticipantName: activity?.participantName ?? null,
           newParticipantName: participantName ?? null,
         },
       }),

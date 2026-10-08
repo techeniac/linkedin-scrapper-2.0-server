@@ -177,6 +177,13 @@ model MessageActivity {
   // The other party (receiver).
   participantLinkedinId String?   @map("participant_linkedin_id")
   participantName       String?   @map("participant_name")
+  // Set true by a manual owner-override name correction (see
+  // ownerOverrideRepository.applyOverride) — once true, the scraper sync's
+  // own upsert (messageActivityRepository.upsert) stops COALESCE-ing in
+  // LinkedIn's raw captured name over it, so a human's correction survives
+  // the next sync of the same conversation instead of being silently
+  // reverted.
+  participantNameOverridden Boolean @default(false) @map("participant_name_overridden")
   participantProfileUrl String?   @map("participant_profile_url")
   // The app user's own LinkedIn identity (sender) for this conversation.
   selfLinkedinId        String?   @map("self_linkedin_id")
