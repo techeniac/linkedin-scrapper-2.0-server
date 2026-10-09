@@ -18,7 +18,8 @@
     "backfill:connection-events": "ts-node --transpile-only src/scripts/backfillConnectionRequestEvents.ts",
     "backfill:message-events": "ts-node --transpile-only src/scripts/backfillMessageEvents.ts",
     "dedupe:message-events": "ts-node --transpile-only src/scripts/dedupeMessageEvents.ts",
-    "backfill:message-owners": "ts-node --transpile-only src/scripts/backfillMessageOwners.ts"
+    "backfill:message-owners": "ts-node --transpile-only src/scripts/backfillMessageOwners.ts",
+    "backfill:ambiguous-reasons": "ts-node --transpile-only src/scripts/backfillAmbiguousReasons.ts"
   },
   "keywords": [
     "nodejs",
