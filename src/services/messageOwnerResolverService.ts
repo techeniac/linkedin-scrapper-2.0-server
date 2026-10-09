@@ -111,8 +111,13 @@ export class MessageOwnerResolverService {
     // users can scrape the same shared LinkedIn account, and only one of
     // them may have captured the participant name. Any scraper's captured
     // name for this conversationKey is usable.
+    // Prefer a row a human has already corrected (participantNameOverridden)
+    // over whichever scraper's row Postgres happens to return first — once a
+    // correction exists for this conversationKey, it's the name that should
+    // drive resolution, not a stale/raw capture from another scraper's row.
     const activity = await prisma.messageActivity.findFirst({
       where: { conversationKey, participantName: { not: null } },
+      orderBy: { participantNameOverridden: "desc" },
       select: { participantName: true },
     });
     const name = activity?.participantName?.trim();
