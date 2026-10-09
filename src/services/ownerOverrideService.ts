@@ -16,6 +16,7 @@ export interface AmbiguousConversationDTO {
   conversationKey: string;
   participantName: string | null;
   resolvedAt: Date;
+  ambiguousReason: string | null;
 }
 
 export interface AmbiguousListResult {
@@ -76,6 +77,7 @@ export class OwnerOverrideService {
     newOwnerId: string;
     requesterEmail: string;
     scope: RequesterScope;
+    participantName?: string;
   }): Promise<void> {
     if (params.scope === "regular") {
       const scraperUserId = await this.resolveScraperUserId(params.requesterEmail);
@@ -92,12 +94,26 @@ export class OwnerOverrideService {
       throw new ValidationError("ownerId must be a HubSpot-connected owner");
     }
 
-    const cached = await OwnerOverrideRepository.findCachedOwner(params.conversationKey);
+    // Present-but-blank is rejected; absent is "no name change attempted"
+    // and is left as undefined all the way through to the repository.
+    let participantName: string | undefined;
+    if (params.participantName !== undefined) {
+      const trimmed = params.participantName.trim();
+      if (!trimmed) {
+        throw new ValidationError("participantName must not be blank");
+      }
+      participantName = trimmed;
+    }
+
+    // The ambiguous-state guard (409) is enforced atomically inside
+    // OwnerOverrideRepository.applyOverride's own transaction, not here —
+    // see that method's doc comment for why a separate pre-check would be
+    // a TOCTOU race between two concurrent overrides.
     await OwnerOverrideRepository.applyOverride({
       conversationKey: params.conversationKey,
-      oldOwnerId: cached?.resolvedOwnerId ?? null,
       newOwnerId: params.newOwnerId,
       performedByEmail: params.requesterEmail,
+      participantName,
     });
   }
 }

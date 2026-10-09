@@ -39,21 +39,40 @@ export class MessageActivityRepository {
     return prisma.$executeRaw`
       INSERT INTO message_activity (
         id, user_id, conversation_key,
-        participant_linkedin_id, participant_name, participant_profile_url,
+        participant_linkedin_id, participant_name, participant_name_overridden, participant_profile_url,
         self_linkedin_id, self_name, self_profile_url,
         sent_count, received_count, follow_up_count, read_count,
         has_reply, is_conversation,
         first_message_at, last_message_at,
         created_at, updated_at
-      ) VALUES (
+      )
+      SELECT
         ${randomUUID()}, ${r.userId}, ${r.conversationKey},
-        ${r.participantLinkedinId}, ${r.participantName}, ${r.participantProfileUrl},
+        ${r.participantLinkedinId},
+        -- A brand-new scraper row (first sync of this conversationKey by a
+        -- NEWLY-connected scraper) must inherit any name a human has
+        -- already corrected on another scraper's row for the same
+        -- conversation — otherwise the correction silently stops being
+        -- "uniform across every scraper" the moment a new scraper joins
+        -- the conversation (see ownerOverrideRepository.applyOverride).
+        -- The ON CONFLICT branch below already protects an EXISTING row
+        -- the same way via participant_name_overridden; this covers the
+        -- INSERT path that branch never runs for.
+        COALESCE(corrected.participant_name, ${r.participantName}),
+        COALESCE(corrected.participant_name IS NOT NULL, false),
+        ${r.participantProfileUrl},
         ${r.selfLinkedinId}, ${r.selfName}, ${r.selfProfileUrl},
         ${r.sentCount}, ${r.receivedCount}, ${r.followUpCount}, ${r.readCount},
         ${r.hasReply}, ${r.isConversation},
         ${r.firstMessageAt}, ${r.lastMessageAt},
         NOW(), NOW()
-      )
+      FROM (VALUES (1)) AS seed
+      LEFT JOIN LATERAL (
+        SELECT participant_name
+        FROM message_activity
+        WHERE conversation_key = ${r.conversationKey} AND participant_name_overridden = true
+        LIMIT 1
+      ) corrected ON true
       ON CONFLICT (user_id, conversation_key) DO UPDATE SET
         sent_count       = GREATEST(message_activity.sent_count,      EXCLUDED.sent_count),
         received_count   = GREATEST(message_activity.received_count,  EXCLUDED.received_count),
@@ -64,7 +83,14 @@ export class MessageActivityRepository {
         first_message_at = LEAST(message_activity.first_message_at,   EXCLUDED.first_message_at),
         last_message_at  = GREATEST(message_activity.last_message_at, EXCLUDED.last_message_at),
         participant_linkedin_id = COALESCE(EXCLUDED.participant_linkedin_id, message_activity.participant_linkedin_id),
-        participant_name        = COALESCE(EXCLUDED.participant_name,        message_activity.participant_name),
+        -- A human-corrected name (owner-override participantNameOverridden)
+        -- is protected from this sync's own COALESCE merge — otherwise the
+        -- next sync of this conversation would silently revert the
+        -- correction back to LinkedIn's raw captured name.
+        participant_name        = CASE WHEN message_activity.participant_name_overridden
+                                     THEN message_activity.participant_name
+                                     ELSE COALESCE(EXCLUDED.participant_name, message_activity.participant_name)
+                                   END,
         participant_profile_url = COALESCE(EXCLUDED.participant_profile_url, message_activity.participant_profile_url),
         self_linkedin_id        = COALESCE(EXCLUDED.self_linkedin_id,        message_activity.self_linkedin_id),
         self_name               = COALESCE(EXCLUDED.self_name,               message_activity.self_name),

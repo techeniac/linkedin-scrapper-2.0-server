@@ -24,11 +24,16 @@ export class ConversationOwnerCacheRepository {
     conversationKey: string,
     resolvedOwnerId: string | null,
     attributionSource: "hubspot" | "fallback" | "ambiguous" | "manual",
+    ambiguousReason?: string,
   ): Promise<void> {
+    // NULL whenever the source isn't 'ambiguous' — covers both the normal
+    // hubspot/fallback resolver outcomes AND the override path (Task 4),
+    // which calls this with attributionSource: "manual" and no reason arg.
+    const reason = attributionSource === "ambiguous" ? ambiguousReason ?? null : null;
     await prisma.conversationOwnerCache.upsert({
       where: { conversationKey },
-      create: { conversationKey, resolvedOwnerId, attributionSource },
-      update: { resolvedOwnerId, attributionSource, resolvedAt: new Date() },
+      create: { conversationKey, resolvedOwnerId, attributionSource, ambiguousReason: reason },
+      update: { resolvedOwnerId, attributionSource, ambiguousReason: reason, resolvedAt: new Date() },
     });
   }
 }
