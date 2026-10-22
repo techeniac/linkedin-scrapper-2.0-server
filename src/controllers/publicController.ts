@@ -16,6 +16,9 @@ import {
   getConnectedOwnerNameMap,
 } from "../services/hubspotOwnersService";
 import prisma from "../config/prisma";
+import logger from "../utils/logger";
+import { MessageOwnerResolverService } from "../services/messageOwnerResolverService";
+import { ConversationOwnerCacheRepository } from "../repositories/conversationOwnerCacheRepository";
 import { successResponse, errorResponse } from "../utils/apiResponse";
 import { PublicApiRequest } from "../types";
 
@@ -324,6 +327,11 @@ export const getSummary = async (
         owners.map((o) => ({ id: o.id, hubspotOwnerId: o.hubspotOwnerId })),
       ),
     ]);
+    // Lazy self-heal for conversations that went ambiguous only because the
+    // HubSpot contact wasn't there yet — fire-and-forget, throttled inside.
+    void MessageOwnerResolverService.retryAmbiguous().catch((err) =>
+      logger.warn(`[public] ambiguous retry failed: ${err?.message}`),
+    );
     const ownerIds = owners.map((o) => o.id);
     const scopedOwnerIds = applyRequesterScope(ownerIds, req.scopeOwnerIds);
     const userId = pickOwner(req.query.userId, scopedOwnerIds);
@@ -530,11 +538,13 @@ export const getSummary = async (
     // right now" — so it comes from current state rather than the event log.
     // Independent reads, so run them together instead of paying 4 sequential
     // round trips on every dashboard load.
-    const [pendingNow, forgottenLeadsTotal, nextStepGapTotals, scheduledNoTouchTotal] = await Promise.all([
+    const [pendingNow, forgottenLeadsTotal, nextStepGapTotals, scheduledNoTouchTotal, excludedAmbiguousCount] = await Promise.all([
       ConnectionService.getStats(userId, ownerScope),
       ForgottenLeadService.getTotal(ownerScope),
       NextStepGapService.getTotals(ownerScope),
       ScheduledNoTouchService.getTotal(ownerScope),
+      // Conversations hidden from every report until resolved or overridden.
+      ConversationOwnerCacheRepository.countAmbiguousForScrapers(ownerScope),
     ]);
 
     successResponse(
@@ -566,6 +576,7 @@ export const getSummary = async (
         scheduledNoTouchSeries,
         scheduledNoTouchSeriesByOwner,
         scheduledNoTouchTotal,
+        excludedAmbiguousCount,
         users: owners.filter((o) => scopedOwnerIds.includes(o.id)),
         linkedinAccounts,
       },

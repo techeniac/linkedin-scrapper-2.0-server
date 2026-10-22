@@ -316,6 +316,9 @@ model MessageEvent {
   // scan). isFollowUp=true already implies type=SENT (only sent messages get
   // this flag), so type isn't needed in the index.
   @@index([userId, isFollowUp, respondsToAt])
+  // Links a connection event to its conversation (self account + participant) —
+  // see EFFECTIVE_EVENTS in connectionEventRepository.ts.
+  @@index([selfLinkedinId, participantLinkedinId])
   @@map("message_events")
 }
 
