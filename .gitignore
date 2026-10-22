@@ -1,5 +1,4 @@
 node_modules/
-.env
 logs/
 *.log
 .DS_Store
@@ -8,3 +7,4 @@ dist/
 build/
 .vscode.worktrees/
 .claude/
+config.bat

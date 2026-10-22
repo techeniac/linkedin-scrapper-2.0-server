@@ -67,7 +67,62 @@ export interface ResolvedOwner {
   ambiguousReason?: AmbiguousReason;
 }
 
+// Retry policy for conversations that went ambiguous for a reason that can fix
+// itself: the contact hadn't reached HubSpot yet (NO_HUBSPOT_MATCH) or its owner
+// wasn't connected yet (OWNER_NOT_CONNECTED). NO_NAME / SINGLE_WORD_NAME /
+// MULTIPLE_HUBSPOT_MATCHES never resolve without a human, so they are not retried.
+// shortcut: lazy retry on report load (no cron on Vercel), throttled per process
+// and capped per run — move to a scheduled job if the ambiguous queue grows.
+const RETRYABLE_REASONS = ["NO_HUBSPOT_MATCH", "OWNER_NOT_CONNECTED"];
+const RETRY_MIN_AGE_MS = 5 * 60 * 1000; // give the HubSpot sync time to land
+const RETRY_MAX_AGE_MS = 24 * 60 * 60 * 1000; // after a day it needs a human
+const RETRY_THROTTLE_MS = 10 * 60 * 1000;
+const RETRY_BATCH = 20; // bounds HubSpot calls per run
+let lastRetryAt = 0;
+let retryInFlight: Promise<number> | null = null;
+
 export class MessageOwnerResolverService {
+  /**
+   * Re-resolves recent retryable-ambiguous conversations and credits them to
+   * the HubSpot owner once one is found, restamping their events. Never
+   * touches 'manual' rows (see promoteAmbiguous). Returns how many resolved.
+   */
+  static retryAmbiguous(now: Date = new Date()): Promise<number> {
+    if (retryInFlight) return retryInFlight;
+    if (now.getTime() - lastRetryAt < RETRY_THROTTLE_MS) return Promise.resolve(0);
+    lastRetryAt = now.getTime();
+    retryInFlight = this.runRetry(now).finally(() => {
+      retryInFlight = null;
+    });
+    return retryInFlight;
+  }
+
+  private static async runRetry(now: Date): Promise<number> {
+    const rows = await ConversationOwnerCacheRepository.findRetryableAmbiguous({
+      reasons: RETRYABLE_REASONS,
+      olderThan: new Date(now.getTime() - RETRY_MIN_AGE_MS),
+      newerThan: new Date(now.getTime() - RETRY_MAX_AGE_MS),
+      limit: RETRY_BATCH,
+    });
+    let resolvedCount = 0;
+    // Sequential on purpose: HubSpot's Search API is rate limited.
+    for (const { conversationKey, scraperUserId } of rows) {
+      if (!scraperUserId) continue;
+      try {
+        const r = await this.resolveOwnerFromHubSpot(conversationKey, scraperUserId);
+        if (r.source !== "hubspot" || !r.ownerId) continue; // still ambiguous / transient
+        if (await ConversationOwnerCacheRepository.promoteAmbiguous(conversationKey, r.ownerId)) {
+          await MessageEventRepository.updateResolvedOwner(conversationKey, r.ownerId, "hubspot");
+          resolvedCount++;
+        }
+      } catch (err: any) {
+        logger.warn(`[MessageOwnerResolver] retry failed for ${conversationKey}: ${err?.message}`);
+      }
+    }
+    if (resolvedCount) logger.info(`[MessageOwnerResolver] auto-resolved ${resolvedCount} ambiguous conversation(s)`);
+    return resolvedCount;
+  }
+
   static async resolveAndPersist(params: { conversationKey: string; scraperUserId: string }): Promise<void> {
     const cached = await ConversationOwnerCacheRepository.findByConversationKey(params.conversationKey);
     if (cached) {

@@ -374,10 +374,10 @@ export class ConnectionEventService {
   // orderBy), keyed by the PUBLIC field name (matches getConnections'
   // response shape: status/date/contactName) rather than the underlying
   // Prisma column name.
-  private static readonly SORT_COLUMNS: Record<string, string> = {
-    date: "occurredAt",
-    status: "toStatus",
-    contactName: "targetName",
+  private static readonly SORT_COLUMNS: Record<string, "occurred_at" | "to_status" | "target_name"> = {
+    date: "occurred_at",
+    status: "to_status",
+    contactName: "target_name",
   };
 
   /**
@@ -398,31 +398,26 @@ export class ConnectionEventService {
   }> {
     const page = Math.max(1, p.page || 1);
     const limit = Math.min(100, Math.max(1, p.limit || 10));
-    const sortBy = this.SORT_COLUMNS[p.sortBy ?? ""] ?? "occurredAt";
+    const orderBy = this.SORT_COLUMNS[p.sortBy ?? ""] ?? "occurred_at";
     const sortOrder: "asc" | "desc" = p.sortOrder === "asc" ? "asc" : "desc";
 
-    const where: Prisma.ConnectionRequestEventWhereInput = {
-      occurredAt: { gte: p.from, lte: p.to },
-    };
-    if (p.userId) where.userId = p.userId;
-    else if (p.userIds) where.userId = { in: p.userIds };
-    if (p.actorLinkedinIds?.length) where.actorLinkedinId = { in: p.actorLinkedinIds };
-    else if (p.actorLinkedinId) where.actorLinkedinId = p.actorLinkedinId;
-    if (p.statuses?.length) where.toStatus = { in: p.statuses };
-    if (p.search) {
-      where.OR = [
-        { targetName: { contains: p.search, mode: "insensitive" } },
-        { actorName: { contains: p.search, mode: "insensitive" } },
-        { targetProfileUrl: { contains: p.search, mode: "insensitive" } },
-      ];
-    }
-
-    const [data, total] = await ConnectionEventRepository.findAndCountEvents(
-      where,
-      { [sortBy]: sortOrder } as Prisma.ConnectionRequestEventOrderByWithRelationInput,
-      (page - 1) * limit,
-      limit,
-    );
+    const { data: rows, total } = await ConnectionEventRepository.listEvents({
+      from: p.from,
+      to: p.to,
+      userId: p.userId,
+      userIds: p.userIds,
+      actorLinkedinId: p.actorLinkedinId,
+      actorLinkedinIds: p.actorLinkedinIds,
+      statuses: p.statuses,
+      search: p.search,
+      orderBy,
+      sortOrder,
+      skip: (page - 1) * limit,
+      take: limit,
+    });
+    // Same row shape the controller already maps (owner-name fallback lives
+    // under `user`).
+    const data = rows.map(({ userName, ...r }) => ({ ...r, user: { name: userName } }));
 
     return {
       data,
